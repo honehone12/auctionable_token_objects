@@ -1,0 +1,11 @@
+[package]
+name = 'TokenObjectsMarketplace'
+version = '1.0.0'
+
+[dependencies]
+AptosFramework = { local = "../../aptos-core/aptos-move/framework/aptos-framework" }
+AptosToken = { local = "../../aptos-core/aptos-move/framework/aptos-token" }
+TokenObjects = { local = "../../aptos-core/aptos-move/move-examples/token_objects" }
+
+[addresses]
+token_objects_marketplace = "0xcafe"
