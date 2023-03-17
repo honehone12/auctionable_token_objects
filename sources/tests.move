@@ -4,6 +4,7 @@ module token_objects_marketplace::tests {
     use std::option;
     use std::string::utf8;
     use aptos_framework::timestamp;
+    use aptos_framework::coin::FakeMoney;
     use aptos_framework::object::{Self, Object};
     use token_objects::collection;
     use token_objects::token;
@@ -35,18 +36,17 @@ module token_objects_marketplace::tests {
             utf8(b"uri")
         );
         move_to(&object::generate_signer(&cctor), FreePizzaPass{});
-        tradings::init_with_constructor_ref<FreePizzaPass>(
-            &cctor, 
-            utf8(b"collection"), utf8(b"name")
-        );
-        object::object_from_constructor_ref<FreePizzaPass>(&cctor)
+        let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor); 
+        let ex = object::generate_extend_ref(&cctor);
+        tradings::init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
+        obj
     }
 
     #[test(creator = @0x123, framework = @0x1)]
     fun test_happy_path(creator: &signer, framework: &signer) {
         setup_test(framework);
         let obj = create_test_object(creator);
-        tradings::start_auction(
+        tradings::start_auction<FreePizzaPass, FakeMoney>(
             creator,
             obj, 
             utf8(b"collection"), utf8(b"name"),
