@@ -3,8 +3,9 @@ module token_objects_marketplace::tests {
     use std::signer;
     use std::option;
     use std::string::utf8;
+    use aptos_framework::account;
     use aptos_framework::timestamp;
-    use aptos_framework::coin::FakeMoney;
+    use aptos_framework::coin::{Self, FakeMoney};
     use aptos_framework::object::{Self, Object};
     use token_objects::collection;
     use token_objects::token;
@@ -13,8 +14,28 @@ module token_objects_marketplace::tests {
 
     struct FreePizzaPass has key {}
 
-    fun setup_test(framework: &signer) {
+    fun setup_test(
+        owner: &signer, 
+        bidder_1: &signer, 
+        bidder_2: &signer, 
+        creator: &signer, 
+        framework: &signer
+    ) {
+        account::create_account_for_test(@0x1);
         timestamp::set_time_has_started_for_testing(framework);
+        account::create_account_for_test(@0x123);
+        account::create_account_for_test(@0x234);
+        account::create_account_for_test(@0x345);
+        account::create_account_for_test(@0x456);
+        coin::register<FakeMoney>(owner);
+        coin::register<FakeMoney>(bidder_1);
+        coin::register<FakeMoney>(bidder_2);
+        coin::register<FakeMoney>(creator);
+        coin::create_fake_money(framework, creator, 400);
+        coin::transfer<FakeMoney>(framework, @0x123, 100);
+        coin::transfer<FakeMoney>(framework, @0x234, 100);
+        coin::transfer<FakeMoney>(framework, @0x345, 100);
+        coin::transfer<FakeMoney>(framework, @0x456, 100);
     }
 
     fun create_test_object(creator: &signer): Object<FreePizzaPass> {
@@ -42,17 +63,109 @@ module token_objects_marketplace::tests {
         obj
     }
 
-    #[test(creator = @0x123, framework = @0x1)]
-    fun test_happy_path(creator: &signer, framework: &signer) {
-        setup_test(framework);
+    #[test(
+        owner = @0x123, 
+        bidder_1 = @0x234, 
+        bidder_2 = @0x345,  
+        creator = @0x456,
+        framework = @0x1
+    )]
+    fun test_auction_happy_path(
+        owner: &signer, 
+        bidder_1: &signer, 
+        bidder_2: &signer,
+        creator: &signer, 
+        framework: &signer
+    ){
+        setup_test(owner, bidder_1, bidder_2, creator, framework);
         let obj = create_test_object(creator);
-        tradings::start_auction<FreePizzaPass, FakeMoney>(
-            creator,
+        let obj_addr = object::object_address(&obj);
+        object::transfer(creator, obj, @0x123);
+        tradings::start_trading<FreePizzaPass, FakeMoney>(
+            owner,
             obj, 
             utf8(b"collection"), utf8(b"name"),
             false,
-            10,
-            1
+            5,
+            10
         );
+
+        tradings::bid<FreePizzaPass, FakeMoney>(
+            bidder_1,
+            obj_addr,
+            0,
+            5,
+            15
+        );
+
+        tradings::bid<FreePizzaPass, FakeMoney>(
+            bidder_2,
+            obj_addr,
+            0,
+            5,
+            20
+        );
+
+        timestamp::update_global_time_for_test(6_000_000);
+        tradings::execute<FreePizzaPass, FakeMoney>(
+            owner,
+            obj_addr,
+            0
+        );
+
+        assert!(coin::balance<FakeMoney>(@0x123) == 118, 0);
+        assert!(coin::balance<FakeMoney>(@0x234) == 85, 1);
+        assert!(coin::balance<FakeMoney>(@0x345) == 80, 2);
+        assert!(coin::balance<FakeMoney>(@0x456) == 102, 3);
+        assert!(object::is_owner(obj, @0x345), 4);
+    }
+
+    #[test(
+        owner = @0x123, 
+        bidder_1 = @0x234, 
+        bidder_2 = @0x345,  
+        creator = @0x456,
+        framework = @0x1
+    )]
+    fun test_instant_sale_happy_path(
+        owner: &signer, 
+        bidder_1: &signer, 
+        bidder_2: &signer,
+        creator: &signer, 
+        framework: &signer
+    ){
+        setup_test(owner, bidder_1, bidder_2, creator, framework);
+        let obj = create_test_object(creator);
+        let obj_addr = object::object_address(&obj);
+        object::transfer(creator, obj, @0x123);
+        tradings::start_trading<FreePizzaPass, FakeMoney>(
+            owner,
+            obj, 
+            utf8(b"collection"), utf8(b"name"),
+            true,
+            5,
+            10
+        );
+
+        tradings::bid<FreePizzaPass, FakeMoney>(
+            bidder_2,
+            obj_addr,
+            0,
+            5,
+            20
+        );
+
+        timestamp::update_global_time_for_test(6_000_000);
+        tradings::execute<FreePizzaPass, FakeMoney>(
+            owner,
+            obj_addr,
+            0
+        );
+
+        assert!(coin::balance<FakeMoney>(@0x123) == 118, 0);
+        assert!(coin::balance<FakeMoney>(@0x234) == 100, 1);
+        assert!(coin::balance<FakeMoney>(@0x345) == 80, 2);
+        assert!(coin::balance<FakeMoney>(@0x456) == 102, 3);
+        assert!(object::is_owner(obj, @0x345), 4);
     }
 }

@@ -5,7 +5,9 @@ module token_objects_marketplace::tradings {
     use std::string::String;
     use aptos_std::simple_map::{Self, SimpleMap};
     use aptos_std::table_with_length::{Self, TableWithLength};
+    use aptos_framework::coin;
     use aptos_framework::object::{Self, Object, ExtendRef};
+    use token_objects::royalty;
     use token_objects_marketplace::common;
     use token_objects_marketplace::bids::{Self, BidId};
 
@@ -14,6 +16,8 @@ module token_objects_marketplace::tradings {
     const E_ALREADY_ACTIVE: u64 = 1;
     const E_NOT_ACTIVE: u64 = 2;
     const E_PRICE_TOO_LOW: u64 = 3;
+    const E_NO_BIDS: u64 = 4;
+    const E_EMPTY_COIN: u64 = 5;
 
     struct Trading<phantom TCoin> has store {
         min_price: u64,
@@ -57,8 +61,7 @@ module token_objects_marketplace::tradings {
         )
     }
 
-
-    public fun start_auction<T: key, TCoin>(
+    public fun start_trading<T: key, TCoin>(
         owner: &signer,
         object: Object<T>,
         collection_name: String,
@@ -96,12 +99,10 @@ module token_objects_marketplace::tradings {
         bidder: &signer,
         object_address: address,
         index: u64,
-        bid_price: u64,
-        expiration_sec: u64 // !!! range
+        expiration_sec: u64, // !!! range
+        bid_price: u64
     )
     acquires TradingRecords {
-        common::assert_after_now(expiration_sec);
-        common::verify_price_range(bid_price);
         let bidder_addr = signer::address_of(bidder); 
         common::assert_enough_balance<TCoin>(bidder_addr, bid_price);
         let obj = object::address_to_object<T>(object_address);
@@ -121,11 +122,35 @@ module token_objects_marketplace::tradings {
             bidder,
             object_address,
             index,
-            bid_price,
-            expiration_sec
+            expiration_sec,
+            bid_price
         );
         vector::push_back(&mut trading.bid_prices, bid_price);
         simple_map::add(&mut trading.bid_map, bid_price, bid_id);
+    }
+
+    public fun execute<T: key, TCoin>(
+        owner: &signer,
+        object_address: address,
+        index: u64,
+    )
+    acquires TradingRecords {
+        let owner_address = signer::address_of(owner);
+        let obj = object::address_to_object<T>(object_address);
+        common::assert_object_owner(obj, owner_address);
+        let records = borrow_global_mut<TradingRecords<TCoin>>(object_address);
+        assert!(records.has_active, error::unavailable(E_NOT_ACTIVE));
+        let trading = table_with_length::borrow(&records.trading_table, index);
+        common::assert_before_now(trading.expiration_sec);
+        assert!(vector::length(&trading.bid_prices) > 0, error::unavailable(E_NO_BIDS));
+        let highest_price = highest_price(trading);
+        let bid_id = simple_map::borrow(&trading.bid_map, &highest_price);
+        let royalty = royalty::get(obj);
+        let coin = bids::execute_bid<TCoin>(*bid_id, royalty);
+        assert!(coin::value(&coin) > 0, error::resource_exhausted(E_EMPTY_COIN));
+        records.has_active = false;
+        object::transfer(owner, obj, bids::bidder(bid_id));
+        coin::deposit(owner_address, coin);
     }
 
     #[test_only]
@@ -139,6 +164,8 @@ module token_objects_marketplace::tradings {
     #[test_only]
     use aptos_framework::object::ConstructorRef;
     #[test_only]
+    use aptos_framework::account;
+    #[test_only]
     use token_objects::token;
     #[test_only]
     use token_objects::collection;
@@ -149,6 +176,23 @@ module token_objects_marketplace::tradings {
     #[test_only]
     fun setup_test(framework: &signer) {
         timestamp::set_time_has_started_for_testing(framework);
+    }
+
+    #[test_only]
+    fun setup_test_plus(creator: &signer, bidder: &signer, framework: &signer) {
+        account::create_account_for_test(@0x1);
+        account::create_account_for_test(signer::address_of(creator));
+        account::create_account_for_test(signer::address_of(bidder));
+        timestamp::set_time_has_started_for_testing(framework);
+    }
+
+    #[test_only]
+    fun create_test_money(creator: &signer, bidder: &signer, framework: &signer) {
+        coin::create_fake_money(framework, bidder, 200);
+        coin::register<FakeMoney>(creator);
+        coin::register<FakeMoney>(bidder);
+        coin::transfer<FakeMoney>(framework, signer::address_of(creator), 100);
+        coin::transfer<FakeMoney>(framework, signer::address_of(bidder), 100);
     }
 
     #[test_only]
@@ -167,7 +211,7 @@ module token_objects_marketplace::tradings {
             utf8(b"description"),
             token::create_mutability_config(false, false, false),
             utf8(b"name"),
-            option::none(),
+            option::some(royalty::create(10, 100, signer::address_of(creator))),
             utf8(b"uri")
         );
         move_to(&object::generate_signer(&cctor), FreePizzaPass{});
@@ -203,7 +247,7 @@ module token_objects_marketplace::tradings {
     }
 
     #[test(creator = @0x123, framework = @0x1)]
-    fun test_start_auction(creator: &signer, framework: &signer)
+    fun test_start_trading(creator: &signer, framework: &signer)
     acquires TradingRecords {
         setup_test(framework);
         let cctor = create_test_object(creator);
@@ -211,7 +255,7 @@ module token_objects_marketplace::tradings {
         let obj_addr = object::object_address(&obj);
         let ex = object::generate_extend_ref(&cctor);
         init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
-        start_auction<FreePizzaPass, FakeMoney>(
+        start_trading<FreePizzaPass, FakeMoney>(
             creator,
             obj,
             utf8(b"collection"), utf8(b"name"),
@@ -231,14 +275,14 @@ module token_objects_marketplace::tradings {
 
     #[test(creator = @0x123, other = @0x234, framework = @0x1)]
     #[expected_failure(abort_code = 327681, location = token_objects_marketplace::common)]
-    fun test_start_auction_fail_not_owner(creator: &signer, other: &signer, framework: &signer)
+    fun test_start_trading_fail_not_owner(creator: &signer, other: &signer, framework: &signer)
     acquires TradingRecords {
         setup_test(framework);
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
         init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
-        start_auction<FreePizzaPass, FakeMoney>(
+        start_trading<FreePizzaPass, FakeMoney>(
             other,
             obj,
             utf8(b"collection"), utf8(b"name"),
@@ -250,14 +294,14 @@ module token_objects_marketplace::tradings {
 
     #[test(creator = @0x123, framework = @0x1)]
     #[expected_failure(abort_code = 65538, location = token_objects_marketplace::common)]
-    fun test_start_auction_fail_wrong_collection(creator: &signer, framework: &signer)
+    fun test_start_trading_fail_wrong_collection(creator: &signer, framework: &signer)
     acquires TradingRecords {
         setup_test(framework);
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
         init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
-        start_auction<FreePizzaPass, FakeMoney>(
+        start_trading<FreePizzaPass, FakeMoney>(
             creator,
             obj,
             utf8(b"bad-collection"), utf8(b"name"),
@@ -269,14 +313,14 @@ module token_objects_marketplace::tradings {
 
     #[test(creator = @0x123, framework = @0x1)]
     #[expected_failure(abort_code = 65538, location = token_objects_marketplace::common)]
-    fun test_start_auction_fail_wrong_name(creator: &signer, framework: &signer)
+    fun test_start_trading_fail_wrong_name(creator: &signer, framework: &signer)
     acquires TradingRecords {
         setup_test(framework);
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
         init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
-        start_auction<FreePizzaPass, FakeMoney>(
+        start_trading<FreePizzaPass, FakeMoney>(
             creator,
             obj,
             utf8(b"collection"), utf8(b"bad-name"),
@@ -288,14 +332,14 @@ module token_objects_marketplace::tradings {
 
     #[test(creator = @0x123, framework = @0x1)]
     #[expected_failure(abort_code = 131075, location = token_objects_marketplace::common)]
-    fun test_start_auction_fail_price_zero(creator: &signer, framework: &signer)
+    fun test_start_trading_fail_price_zero(creator: &signer, framework: &signer)
     acquires TradingRecords {
         setup_test(framework);
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
         init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
-        start_auction<FreePizzaPass, FakeMoney>(
+        start_trading<FreePizzaPass, FakeMoney>(
             creator,
             obj,
             utf8(b"collection"), utf8(b"name"),
@@ -307,14 +351,14 @@ module token_objects_marketplace::tradings {
 
     #[test(creator = @0x123, framework = @0x1)]
     #[expected_failure(abort_code = 131075, location = token_objects_marketplace::common)]
-    fun test_start_auction_fail_price_max(creator: &signer, framework: &signer)
+    fun test_start_trading_fail_price_max(creator: &signer, framework: &signer)
     acquires TradingRecords {
         setup_test(framework);
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
         init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
-        start_auction<FreePizzaPass, FakeMoney>(
+        start_trading<FreePizzaPass, FakeMoney>(
             creator,
             obj,
             utf8(b"collection"), utf8(b"name"),
@@ -326,7 +370,7 @@ module token_objects_marketplace::tradings {
 
     #[test(creator = @0x123, framework = @0x1)]
     #[expected_failure(abort_code = 65540, location = token_objects_marketplace::common)]
-    fun test_start_auction_fail_expire_in_past(creator: &signer, framework: &signer)
+    fun test_start_trading_fail_expire_in_past(creator: &signer, framework: &signer)
     acquires TradingRecords {
         setup_test(framework);
         timestamp::update_global_time_for_test(20_000_000);
@@ -334,7 +378,7 @@ module token_objects_marketplace::tradings {
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
         init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
-        start_auction<FreePizzaPass, FakeMoney>(
+        start_trading<FreePizzaPass, FakeMoney>(
             creator,
             obj,
             utf8(b"collection"), utf8(b"name"),
@@ -346,14 +390,14 @@ module token_objects_marketplace::tradings {
 
     #[test(creator = @0x123, framework = @0x1)]
     #[expected_failure(abort_code = 524289, location = Self)]
-    fun test_start_auction_fail_start_twice(creator: &signer, framework: &signer)
+    fun test_start_trading_fail_start_twice(creator: &signer, framework: &signer)
     acquires TradingRecords {
         setup_test(framework);
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
         init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
-        start_auction<FreePizzaPass, FakeMoney>(
+        start_trading<FreePizzaPass, FakeMoney>(
             creator,
             obj,
             utf8(b"collection"), utf8(b"name"),
@@ -362,7 +406,7 @@ module token_objects_marketplace::tradings {
             1
         );
 
-        start_auction<FreePizzaPass, FakeMoney>(
+        start_trading<FreePizzaPass, FakeMoney>(
             creator,
             obj,
             utf8(b"collection"), utf8(b"name"),
@@ -370,5 +414,443 @@ module token_objects_marketplace::tradings {
             20,
             2
         );
+    }
+
+    #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
+    fun test_bid(creator: &signer, bidder: &signer, framework: &signer)
+    acquires TradingRecords {
+        setup_test_plus(creator, bidder, framework);
+        create_test_money(creator, bidder, framework);
+        let cctor = create_test_object(creator);
+        let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
+        let ex = object::generate_extend_ref(&cctor);
+        init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
+        start_trading<FreePizzaPass, FakeMoney>(
+            creator,
+            obj,
+            utf8(b"collection"), utf8(b"name"),
+            false,
+            1,
+            10
+        );
+
+        let object_address = object::object_address(&obj);
+        let index = 0;
+        bid<FreePizzaPass, FakeMoney>(
+            bidder,
+            object_address,
+            index,
+            1,
+            20
+        );
+
+        let records = borrow_global<TradingRecords<FakeMoney>>(object_address);
+        let trading = table_with_length::borrow(&records.trading_table, index);
+        assert!(vector::length(&trading.bid_prices) == 1, 0);
+        assert!(simple_map::contains_key(&trading.bid_map, &20), 1);
+        assert!(coin::balance<FakeMoney>(signer::address_of(bidder)) == 80, 2);
+    }
+
+    #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
+    #[expected_failure(abort_code = 65539, location = Self)]
+    fun test_fail_bid_too_low(creator: &signer, bidder: &signer, framework: &signer)
+    acquires TradingRecords {
+        setup_test_plus(creator, bidder, framework);
+        create_test_money(creator, bidder, framework);
+        let cctor = create_test_object(creator);
+        let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
+        let ex = object::generate_extend_ref(&cctor);
+        init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
+        start_trading<FreePizzaPass, FakeMoney>(
+            creator,
+            obj,
+            utf8(b"collection"), utf8(b"name"),
+            false,
+            1,
+            10
+        );
+
+        let object_address = object::object_address(&obj);
+        let index = 0;
+        bid<FreePizzaPass, FakeMoney>(
+            bidder,
+            object_address,
+            index,
+            1,
+            5
+        );
+    }
+
+    #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
+    #[expected_failure(abort_code = 327687, location = token_objects_marketplace::common)]
+    fun test_fail_bid_owner(creator: &signer, bidder: &signer, framework: &signer)
+    acquires TradingRecords {
+        setup_test_plus(creator, bidder, framework);
+        create_test_money(creator, bidder, framework);
+        let cctor = create_test_object(creator);
+        let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
+        let ex = object::generate_extend_ref(&cctor);
+        init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
+        start_trading<FreePizzaPass, FakeMoney>(
+            creator,
+            obj,
+            utf8(b"collection"), utf8(b"name"),
+            false,
+            1,
+            10
+        );
+
+        let object_address = object::object_address(&obj);
+        let index = 0;
+        bid<FreePizzaPass, FakeMoney>(
+            creator,
+            object_address,
+            index,
+            1,
+            20
+        );
+    }
+
+    #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
+    #[expected_failure(abort_code = 196614, location = token_objects_marketplace::common)]
+    fun test_fail_bid_too_high(creator: &signer, bidder: &signer, framework: &signer)
+    acquires TradingRecords {
+        setup_test_plus(creator, bidder, framework);
+        create_test_money(creator, bidder, framework);
+        let cctor = create_test_object(creator);
+        let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
+        let ex = object::generate_extend_ref(&cctor);
+        init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
+        start_trading<FreePizzaPass, FakeMoney>(
+            creator,
+            obj,
+            utf8(b"collection"), utf8(b"name"),
+            false,
+            1,
+            10
+        );
+
+        let object_address = object::object_address(&obj);
+        let index = 0;
+        bid<FreePizzaPass, FakeMoney>(
+            bidder,
+            object_address,
+            index,
+            1,
+            200
+        );
+    }
+
+    #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
+    #[expected_failure(abort_code = 65540, location = token_objects_marketplace::common)]
+    fun test_fail_bid_expired(creator: &signer, bidder: &signer, framework: &signer)
+    acquires TradingRecords {
+        setup_test_plus(creator, bidder, framework);
+        create_test_money(creator, bidder, framework);
+        let cctor = create_test_object(creator);
+        let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
+        let ex = object::generate_extend_ref(&cctor);
+        init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
+        start_trading<FreePizzaPass, FakeMoney>(
+            creator,
+            obj,
+            utf8(b"collection"), utf8(b"name"),
+            false,
+            1,
+            10
+        );
+
+        timestamp::update_global_time_for_test(2_000_000);
+
+        let object_address = object::object_address(&obj);
+        let index = 0;
+        bid<FreePizzaPass, FakeMoney>(
+            bidder,
+            object_address,
+            index,
+            10,
+            20
+        );
+    }
+
+    #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
+    #[expected_failure(abort_code = 65539, location = Self)]
+    fun test_fail_bid_same_price(creator: &signer, bidder: &signer, framework: &signer)
+    acquires TradingRecords {
+        setup_test_plus(creator, bidder, framework);
+        create_test_money(creator, bidder, framework);
+        let cctor = create_test_object(creator);
+        let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
+        let ex = object::generate_extend_ref(&cctor);
+        init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
+        start_trading<FreePizzaPass, FakeMoney>(
+            creator,
+            obj,
+            utf8(b"collection"), utf8(b"name"),
+            false,
+            1,
+            10
+        );
+
+        let object_address = object::object_address(&obj);
+        let index = 0;
+        bid<FreePizzaPass, FakeMoney>(
+            bidder,
+            object_address,
+            index,
+            1,
+            20
+        );
+
+        bid<FreePizzaPass, FakeMoney>(
+            bidder,
+            object_address,
+            index,
+            1,
+            20
+        );
+    }
+
+    #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
+    #[expected_failure(abort_code = 65540, location = token_objects_marketplace::common)]
+    fun test_fail_bid_after_instant_sale(creator: &signer, bidder: &signer, framework: &signer)
+    acquires TradingRecords {
+        setup_test_plus(creator, bidder, framework);
+        create_test_money(creator, bidder, framework);
+        let cctor = create_test_object(creator);
+        let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
+        let ex = object::generate_extend_ref(&cctor);
+        init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
+        start_trading<FreePizzaPass, FakeMoney>(
+            creator,
+            obj,
+            utf8(b"collection"), utf8(b"name"),
+            true,
+            1,
+            10
+        );
+
+        let object_address = object::object_address(&obj);
+        let index = 0;
+        bid<FreePizzaPass, FakeMoney>(
+            bidder,
+            object_address,
+            index,
+            1,
+            20
+        );
+
+        bid<FreePizzaPass, FakeMoney>(
+            bidder,
+            object_address,
+            index,
+            1,
+            30
+        );
+    }
+    
+    #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
+    fun test_execute(creator: &signer, bidder: &signer, framework: &signer)
+    acquires TradingRecords {
+        setup_test_plus(creator, bidder, framework);
+        create_test_money(creator, bidder, framework);
+        let cctor = create_test_object(creator);
+        let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
+        let ex = object::generate_extend_ref(&cctor);
+        init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
+        let index = start_trading<FreePizzaPass, FakeMoney>(
+            creator,
+            obj,
+            utf8(b"collection"), utf8(b"name"),
+            false,
+            1,
+            10
+        );
+
+        let object_address = object::object_address(&obj);
+        bid<FreePizzaPass, FakeMoney>(
+            bidder,
+            object_address,
+            index,
+            1,
+            20
+        );
+
+        timestamp::update_global_time_for_test(2_000_000);
+        execute<FreePizzaPass, FakeMoney>(creator, object_address, index);
+
+        let records = borrow_global<TradingRecords<FakeMoney>>(object_address);
+        assert!(!records.has_active, 1);
+        assert!(coin::balance<FakeMoney>(@0x123) == 120, 2);
+        assert!(coin::balance<FakeMoney>(@0x234) == 80, 2);
+    }
+
+    #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
+    #[expected_failure(abort_code = 327681, location = token_objects_marketplace::common)]
+    fun test_execute_fail_not_owner(creator: &signer, bidder: &signer, framework: &signer)
+    acquires TradingRecords {
+        setup_test_plus(creator, bidder, framework);
+        create_test_money(creator, bidder, framework);
+        let cctor = create_test_object(creator);
+        let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
+        let ex = object::generate_extend_ref(&cctor);
+        init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
+        let index = start_trading<FreePizzaPass, FakeMoney>(
+            creator,
+            obj,
+            utf8(b"collection"), utf8(b"name"),
+            false,
+            1,
+            10
+        );
+
+        let object_address = object::object_address(&obj);
+        bid<FreePizzaPass, FakeMoney>(
+            bidder,
+            object_address,
+            index,
+            1,
+            20
+        );
+
+        timestamp::update_global_time_for_test(2_000_000);
+        execute<FreePizzaPass, FakeMoney>(bidder, object_address, index);
+    }
+
+    #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
+    #[expected_failure(abort_code = 65541, location = token_objects_marketplace::common)]
+    fun test_execute_fail_before_expiration(creator: &signer, bidder: &signer, framework: &signer)
+    acquires TradingRecords {
+        setup_test_plus(creator, bidder, framework);
+        create_test_money(creator, bidder, framework);
+        let cctor = create_test_object(creator);
+        let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
+        let ex = object::generate_extend_ref(&cctor);
+        init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
+        let index = start_trading<FreePizzaPass, FakeMoney>(
+            creator,
+            obj,
+            utf8(b"collection"), utf8(b"name"),
+            false,
+            1,
+            10
+        );
+
+        let object_address = object::object_address(&obj);
+        bid<FreePizzaPass, FakeMoney>(
+            bidder,
+            object_address,
+            index,
+            1,
+            20
+        );
+
+        execute<FreePizzaPass, FakeMoney>(creator, object_address, index);
+    }
+
+    #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
+    #[expected_failure(abort_code = 851972, location = Self)]
+    fun test_execute_fail_no_bid(creator: &signer, bidder: &signer, framework: &signer)
+    acquires TradingRecords {
+        setup_test_plus(creator, bidder, framework);
+        create_test_money(creator, bidder, framework);
+        let cctor = create_test_object(creator);
+        let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
+        let ex = object::generate_extend_ref(&cctor);
+        init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
+        let index = start_trading<FreePizzaPass, FakeMoney>(
+            creator,
+            obj,
+            utf8(b"collection"), utf8(b"name"),
+            false,
+            1,
+            10
+        );
+
+        let object_address = object::object_address(&obj);
+
+        timestamp::update_global_time_for_test(2_000_000);
+        execute<FreePizzaPass, FakeMoney>(creator, object_address, index);
+    }
+
+    #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
+    #[expected_failure(abort_code = 851970, location = Self)]
+    fun test_execute_fail_not_started(creator: &signer, bidder: &signer, framework: &signer)
+    acquires TradingRecords {
+        setup_test_plus(creator, bidder, framework);
+        create_test_money(creator, bidder, framework);
+        let cctor = create_test_object(creator);
+        let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
+        let ex = object::generate_extend_ref(&cctor);
+        init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
+
+        let object_address = object::object_address(&obj);
+
+        timestamp::update_global_time_for_test(2_000_000);
+        execute<FreePizzaPass, FakeMoney>(creator, object_address, 0);
+    }
+
+    #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
+    #[expected_failure]
+    fun test_execute_fail_wrong_obj(creator: &signer, bidder: &signer, framework: &signer)
+    acquires TradingRecords {
+        setup_test_plus(creator, bidder, framework);
+        create_test_money(creator, bidder, framework);
+        let cctor = create_test_object(creator);
+        let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
+        let ex = object::generate_extend_ref(&cctor);
+        init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
+        let index = start_trading<FreePizzaPass, FakeMoney>(
+            creator,
+            obj,
+            utf8(b"collection"), utf8(b"name"),
+            false,
+            1,
+            10
+        );
+
+        let object_address = object::object_address(&obj);
+        bid<FreePizzaPass, FakeMoney>(
+            bidder,
+            object_address,
+            index,
+            1,
+            20
+        );
+
+        timestamp::update_global_time_for_test(2_000_000);
+        execute<FreePizzaPass, FakeMoney>(creator, @0x0b1, index);
+    }
+
+    #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
+    #[expected_failure]
+    fun test_execute_fail_wrong_idx(creator: &signer, bidder: &signer, framework: &signer)
+    acquires TradingRecords {
+        setup_test_plus(creator, bidder, framework);
+        create_test_money(creator, bidder, framework);
+        let cctor = create_test_object(creator);
+        let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
+        let ex = object::generate_extend_ref(&cctor);
+        init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
+        let index = start_trading<FreePizzaPass, FakeMoney>(
+            creator,
+            obj,
+            utf8(b"collection"), utf8(b"name"),
+            false,
+            1,
+            10
+        );
+
+        let object_address = object::object_address(&obj);
+        bid<FreePizzaPass, FakeMoney>(
+            bidder,
+            object_address,
+            index,
+            1,
+            20
+        );
+
+        timestamp::update_global_time_for_test(2_000_000);
+        execute<FreePizzaPass, FakeMoney>(creator, object_address, 1);
     }
 }
