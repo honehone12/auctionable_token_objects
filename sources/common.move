@@ -13,6 +13,10 @@ module token_objects_marketplace::common {
     const E_TIME_NOT_EXPIRED: u64 = 5;
     const E_NOT_ENOUGH_BALANCE: u64 = 6;
     const E_ALREADY_OWNER: u64 = 7;
+    const E_INVALID_TIME_RANGE: u64 = 8;
+
+    const MIN_EXPIRATION_SEC: u64 = 86400; // a day
+    const MAX_EXPIRATION_SEC: u64 = 2592000; // 30 days
 
     public fun assert_object_owner<T: key>(obj: Object<T>, owner_addr: address) {
         assert!(object::is_owner<T>(obj, owner_addr), error::permission_denied(E_NOT_OWNER));
@@ -28,6 +32,14 @@ module token_objects_marketplace::common {
 
     public fun assert_before_now(sec: u64) {
         assert!(sec < timestamp::now_seconds(), error::invalid_argument(E_TIME_NOT_EXPIRED));
+    }
+
+    public fun assert_expiration_range(sec: u64) {
+        let now = timestamp::now_seconds();
+        assert!(
+            now + MIN_EXPIRATION_SEC <= sec && sec < now + MAX_EXPIRATION_SEC,
+            error::invalid_argument(E_INVALID_TIME_RANGE)
+        );
     }
 
     public fun assert_enough_balance<TCoin>(addr: address, balance: u64) {

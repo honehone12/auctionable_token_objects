@@ -11,6 +11,7 @@ module token_objects_marketplace::tests {
     use token_objects::token;
     use token_objects::royalty;
     use token_objects_marketplace::tradings;
+    use token_objects_marketplace::bids;
 
     struct FreePizzaPass has key {}
 
@@ -42,16 +43,14 @@ module token_objects_marketplace::tests {
         _ = collection::create_untracked_collection(
             creator,
             utf8(b"collection description"),
-            collection::create_mutability_config(false, false),
             utf8(b"collection"),
             option::none(),
             utf8(b"collection uri"),
         );
-        let cctor = token::create_token(
+        let cctor = token::create(
             creator,
             utf8(b"collection"),
             utf8(b"description"),
-            token::create_mutability_config(false, false, false),
             utf8(b"name"),
             option::some(royalty::create(10, 100, signer::address_of(creator))),
             utf8(b"uri")
@@ -86,7 +85,7 @@ module token_objects_marketplace::tests {
             obj, 
             utf8(b"collection"), utf8(b"name"),
             false,
-            5,
+            86400 + 5,
             10
         );
 
@@ -94,7 +93,6 @@ module token_objects_marketplace::tests {
             bidder_1,
             obj_addr,
             0,
-            5,
             15
         );
 
@@ -102,12 +100,11 @@ module token_objects_marketplace::tests {
             bidder_2,
             obj_addr,
             0,
-            5,
             20
         );
 
-        timestamp::update_global_time_for_test(6_000_000);
-        tradings::execute<FreePizzaPass, FakeMoney>(
+        timestamp::update_global_time_for_test(6_000_000 + 86400_000_000);
+        tradings::complete<FreePizzaPass, FakeMoney>(
             owner,
             obj_addr,
             0
@@ -118,6 +115,10 @@ module token_objects_marketplace::tests {
         assert!(coin::balance<FakeMoney>(@0x345) == 80, 2);
         assert!(coin::balance<FakeMoney>(@0x456) == 102, 3);
         assert!(object::is_owner(obj, @0x345), 4);
+
+        timestamp::update_global_time_for_test(6000_000 + 86400_000_000 + 86400_000_000);
+        bids::withdraw_from_expired<FakeMoney>(bidder_1);
+        assert!(coin::balance<FakeMoney>(@0x234) == 100, 5);
     }
 
     #[test(
@@ -143,7 +144,7 @@ module token_objects_marketplace::tests {
             obj, 
             utf8(b"collection"), utf8(b"name"),
             true,
-            5,
+            5 + 86400,
             10
         );
 
@@ -151,21 +152,20 @@ module token_objects_marketplace::tests {
             bidder_2,
             obj_addr,
             0,
-            5,
             20
         );
 
-        timestamp::update_global_time_for_test(6_000_000);
-        tradings::execute<FreePizzaPass, FakeMoney>(
+        timestamp::update_global_time_for_test(4_000_000 + 86400_000_000 + 86400_000_000);
+        tradings::complete<FreePizzaPass, FakeMoney>(
             owner,
             obj_addr,
             0
         );
 
+        assert!(object::is_owner(obj, @0x345), 4);
         assert!(coin::balance<FakeMoney>(@0x123) == 118, 0);
         assert!(coin::balance<FakeMoney>(@0x234) == 100, 1);
         assert!(coin::balance<FakeMoney>(@0x345) == 80, 2);
         assert!(coin::balance<FakeMoney>(@0x456) == 102, 3);
-        assert!(object::is_owner(obj, @0x345), 4);
     }
 }

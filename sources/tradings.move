@@ -6,23 +6,24 @@ module token_objects_marketplace::tradings {
     use aptos_std::simple_map::{Self, SimpleMap};
     use aptos_std::table_with_length::{Self, TableWithLength};
     use aptos_framework::coin;
+    use aptos_framework::timestamp;
     use aptos_framework::object::{Self, Object, ExtendRef};
     use token_objects::royalty;
     use token_objects_marketplace::common;
     use token_objects_marketplace::bids::{Self, BidId};
 
-    // !!! time range config | see v1
-
     const E_ALREADY_ACTIVE: u64 = 1;
     const E_NOT_ACTIVE: u64 = 2;
     const E_PRICE_TOO_LOW: u64 = 3;
-    const E_NO_BIDS: u64 = 4;
-    const E_EMPTY_COIN: u64 = 5;
+    const E_EMPTY_COIN: u64 = 4;
+    const E_ALREADY_SOLD: u64 = 5;
+
+    const MAX_WAIT_UNTIL_EXECUTION: u64 = 86400; // a day
 
     struct Trading<phantom TCoin> has store {
         min_price: u64,
         is_instant_sale: bool,
-        expiration_sec: u64, // !!! range
+        expiration_sec: u64,
 
         bid_map: SimpleMap<u64, BidId>,
         bid_prices: vector<u64>
@@ -75,7 +76,7 @@ module token_objects_marketplace::tradings {
         common::assert_object_owner<T>(object, owner_addr);
         common::verify_token_object<T>(object, collection_name, token_name);
         common::verify_price_range(min_price);
-        common::assert_after_now(expiration_sec);
+        common::assert_expiration_range(expiration_sec);
         let obj_addr = object::object_address(&object);
         let records = borrow_global_mut<TradingRecords<TCoin>>(obj_addr);
         assert!(!records.has_active, error::already_exists(E_ALREADY_ACTIVE));
@@ -99,7 +100,6 @@ module token_objects_marketplace::tradings {
         bidder: &signer,
         object_address: address,
         index: u64,
-        expiration_sec: u64, // !!! range
         bid_price: u64
     )
     acquires TradingRecords {
@@ -111,25 +111,26 @@ module token_objects_marketplace::tradings {
         assert!(records.has_active, error::unavailable(E_NOT_ACTIVE));
         let trading = table_with_length::borrow_mut(&mut records.trading_table, index);
         common::assert_after_now(trading.expiration_sec);
-
-        if (trading.is_instant_sale) {
-            assert!(bid_price >= trading.min_price, error::invalid_argument(E_PRICE_TOO_LOW));
-            trading.expiration_sec = 0;
-        } else {
-            assert!(bid_price > highest_price(trading), error::invalid_argument(E_PRICE_TOO_LOW));
-        };
         let bid_id = bids::bid<TCoin>(
             bidder,
             object_address,
             index,
-            expiration_sec,
+            trading.expiration_sec + MAX_WAIT_UNTIL_EXECUTION,
             bid_price
         );
+
+        if (trading.is_instant_sale) {
+            assert!(bid_price >= trading.min_price, error::invalid_argument(E_PRICE_TOO_LOW));
+            assert!(vector::length(&trading.bid_prices) == 0, error::unavailable(E_ALREADY_SOLD));
+        } else {
+            assert!(bid_price > highest_price(trading), error::invalid_argument(E_PRICE_TOO_LOW));
+        };
+        
         vector::push_back(&mut trading.bid_prices, bid_price);
         simple_map::add(&mut trading.bid_map, bid_price, bid_id);
     }
 
-    public fun execute<T: key, TCoin>(
+    public fun complete<T: key, TCoin>(
         owner: &signer,
         object_address: address,
         index: u64,
@@ -140,25 +141,30 @@ module token_objects_marketplace::tradings {
         common::assert_object_owner(obj, owner_address);
         let records = borrow_global_mut<TradingRecords<TCoin>>(object_address);
         assert!(records.has_active, error::unavailable(E_NOT_ACTIVE));
-        let trading = table_with_length::borrow(&records.trading_table, index);
+        let trading = table_with_length::borrow_mut(&mut records.trading_table, index);
         common::assert_before_now(trading.expiration_sec);
-        assert!(vector::length(&trading.bid_prices) > 0, error::unavailable(E_NO_BIDS));
-        let highest_price = highest_price(trading);
-        let bid_id = simple_map::borrow(&trading.bid_map, &highest_price);
-        let royalty = royalty::get(obj);
-        let coin = bids::execute_bid<TCoin>(*bid_id, royalty);
-        assert!(coin::value(&coin) > 0, error::resource_exhausted(E_EMPTY_COIN));
-        records.has_active = false;
-        object::transfer(owner, obj, bids::bidder(bid_id));
-        coin::deposit(owner_address, coin);
+        
+        if (
+            vector::length(&trading.bid_prices) > 0 && 
+            timestamp::now_seconds() < trading.expiration_sec + MAX_WAIT_UNTIL_EXECUTION  
+        ) {
+            let highest_price = highest_price(trading);
+            let bid_id = simple_map::borrow(&trading.bid_map, &highest_price);
+            let royalty = royalty::get(obj);
+            let coin = bids::execute_bid<TCoin>(*bid_id, royalty);
+            assert!(coin::value(&coin) > 0, error::resource_exhausted(E_EMPTY_COIN));
+            records.has_active = false;
+            object::transfer(owner, obj, bids::bidder(bid_id));
+            coin::deposit(owner_address, coin);
+        } else {
+            records.has_active = false;
+        }
     }
 
     #[test_only]
     use std::option;
     #[test_only]
     use std::string::utf8;
-    #[test_only]
-    use aptos_framework::timestamp;
     #[test_only]
     use aptos_framework::coin::FakeMoney;
     #[test_only]
@@ -200,16 +206,14 @@ module token_objects_marketplace::tradings {
         _ = collection::create_untracked_collection(
             creator,
             utf8(b"collection description"),
-            collection::create_mutability_config(false, false),
             utf8(b"collection"),
             option::none(),
             utf8(b"collection uri"),
         );
-        let cctor = token::create_token(
+        let cctor = token::create(
             creator,
             utf8(b"collection"),
             utf8(b"description"),
-            token::create_mutability_config(false, false, false),
             utf8(b"name"),
             option::some(royalty::create(10, 100, signer::address_of(creator))),
             utf8(b"uri")
@@ -260,7 +264,7 @@ module token_objects_marketplace::tradings {
             obj,
             utf8(b"collection"), utf8(b"name"),
             false,
-            10,
+            1 + 86400,
             1
         );
         let records = borrow_global<TradingRecords<FakeMoney>>(obj_addr);
@@ -268,7 +272,7 @@ module token_objects_marketplace::tradings {
         assert!(records.has_active, 1);
         assert!(table_with_length::contains(&records.trading_table, 0), 2);
         let auction = table_with_length::borrow(&records.trading_table, 0);
-        assert!(auction.expiration_sec == 10, 3);
+        assert!(auction.expiration_sec == 86401, 3);
         assert!(auction.min_price == 1, 3);
         assert!(!auction.is_instant_sale, 4);
     }
@@ -287,7 +291,7 @@ module token_objects_marketplace::tradings {
             obj,
             utf8(b"collection"), utf8(b"name"),
             false,
-            10,
+            1 + 86400,
             1
         );
     }
@@ -306,7 +310,7 @@ module token_objects_marketplace::tradings {
             obj,
             utf8(b"bad-collection"), utf8(b"name"),
             false,
-            10,
+            1 + 86400,
             1
         );
     }
@@ -325,7 +329,7 @@ module token_objects_marketplace::tradings {
             obj,
             utf8(b"collection"), utf8(b"bad-name"),
             false,
-            10,
+            1 + 86400,
             1
         );
     }
@@ -344,7 +348,7 @@ module token_objects_marketplace::tradings {
             obj,
             utf8(b"collection"), utf8(b"name"),
             false,
-            10,
+            1 + 86400,
             0
         );
     }
@@ -363,17 +367,17 @@ module token_objects_marketplace::tradings {
             obj,
             utf8(b"collection"), utf8(b"name"),
             false,
-            10,
+            1 + 86400,
             0xffffffff_ffffffff
         );
     }
 
     #[test(creator = @0x123, framework = @0x1)]
-    #[expected_failure(abort_code = 65540, location = token_objects_marketplace::common)]
+    #[expected_failure(abort_code = 65544, location = token_objects_marketplace::common)]
     fun test_start_trading_fail_expire_in_past(creator: &signer, framework: &signer)
     acquires TradingRecords {
         setup_test(framework);
-        timestamp::update_global_time_for_test(20_000_000);
+        timestamp::update_global_time_for_test(20_000_000 + 86400_000_000);
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
@@ -383,7 +387,7 @@ module token_objects_marketplace::tradings {
             obj,
             utf8(b"collection"), utf8(b"name"),
             false,
-            10,
+            1  + 86400,
             1
         );
     }
@@ -402,7 +406,7 @@ module token_objects_marketplace::tradings {
             obj,
             utf8(b"collection"), utf8(b"name"),
             false,
-            10,
+            1 + 86400,
             1
         );
 
@@ -411,7 +415,7 @@ module token_objects_marketplace::tradings {
             obj,
             utf8(b"collection"), utf8(b"name"),
             false,
-            20,
+            2 + 86400,
             2
         );
     }
@@ -430,7 +434,7 @@ module token_objects_marketplace::tradings {
             obj,
             utf8(b"collection"), utf8(b"name"),
             false,
-            1,
+            1 + 86400,
             10
         );
 
@@ -440,7 +444,6 @@ module token_objects_marketplace::tradings {
             bidder,
             object_address,
             index,
-            1,
             20
         );
 
@@ -466,7 +469,7 @@ module token_objects_marketplace::tradings {
             obj,
             utf8(b"collection"), utf8(b"name"),
             false,
-            1,
+            1 + 86400,
             10
         );
 
@@ -476,7 +479,6 @@ module token_objects_marketplace::tradings {
             bidder,
             object_address,
             index,
-            1,
             5
         );
     }
@@ -496,7 +498,7 @@ module token_objects_marketplace::tradings {
             obj,
             utf8(b"collection"), utf8(b"name"),
             false,
-            1,
+            1  + 86400,
             10
         );
 
@@ -506,7 +508,6 @@ module token_objects_marketplace::tradings {
             creator,
             object_address,
             index,
-            1,
             20
         );
     }
@@ -526,7 +527,7 @@ module token_objects_marketplace::tradings {
             obj,
             utf8(b"collection"), utf8(b"name"),
             false,
-            1,
+            1 + 86400,
             10
         );
 
@@ -536,7 +537,6 @@ module token_objects_marketplace::tradings {
             bidder,
             object_address,
             index,
-            1,
             200
         );
     }
@@ -556,11 +556,11 @@ module token_objects_marketplace::tradings {
             obj,
             utf8(b"collection"), utf8(b"name"),
             false,
-            1,
+            1 + 86400,
             10
         );
 
-        timestamp::update_global_time_for_test(2_000_000);
+        timestamp::update_global_time_for_test(2_000_000 + 86400_000_000);
 
         let object_address = object::object_address(&obj);
         let index = 0;
@@ -568,13 +568,12 @@ module token_objects_marketplace::tradings {
             bidder,
             object_address,
             index,
-            10,
             20
         );
     }
 
     #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
-    #[expected_failure(abort_code = 65539, location = Self)]
+    #[expected_failure(abort_code = 524289, location = token_objects_marketplace::bids)]
     fun test_fail_bid_same_price(creator: &signer, bidder: &signer, framework: &signer)
     acquires TradingRecords {
         setup_test_plus(creator, bidder, framework);
@@ -588,7 +587,7 @@ module token_objects_marketplace::tradings {
             obj,
             utf8(b"collection"), utf8(b"name"),
             false,
-            1,
+            1 + 86400,
             10
         );
 
@@ -598,7 +597,6 @@ module token_objects_marketplace::tradings {
             bidder,
             object_address,
             index,
-            1,
             20
         );
 
@@ -606,13 +604,12 @@ module token_objects_marketplace::tradings {
             bidder,
             object_address,
             index,
-            1,
             20
         );
     }
 
     #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
-    #[expected_failure(abort_code = 65540, location = token_objects_marketplace::common)]
+    #[expected_failure(abort_code = 851973, location = Self)]
     fun test_fail_bid_after_instant_sale(creator: &signer, bidder: &signer, framework: &signer)
     acquires TradingRecords {
         setup_test_plus(creator, bidder, framework);
@@ -626,7 +623,7 @@ module token_objects_marketplace::tradings {
             obj,
             utf8(b"collection"), utf8(b"name"),
             true,
-            1,
+            1 + 86400,
             10
         );
 
@@ -636,7 +633,6 @@ module token_objects_marketplace::tradings {
             bidder,
             object_address,
             index,
-            1,
             20
         );
 
@@ -644,13 +640,12 @@ module token_objects_marketplace::tradings {
             bidder,
             object_address,
             index,
-            1,
             30
         );
     }
     
     #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
-    fun test_execute(creator: &signer, bidder: &signer, framework: &signer)
+    fun test_complete(creator: &signer, bidder: &signer, framework: &signer)
     acquires TradingRecords {
         setup_test_plus(creator, bidder, framework);
         create_test_money(creator, bidder, framework);
@@ -663,7 +658,7 @@ module token_objects_marketplace::tradings {
             obj,
             utf8(b"collection"), utf8(b"name"),
             false,
-            1,
+            1 + 86400,
             10
         );
 
@@ -672,12 +667,11 @@ module token_objects_marketplace::tradings {
             bidder,
             object_address,
             index,
-            1,
             20
         );
 
-        timestamp::update_global_time_for_test(2_000_000);
-        execute<FreePizzaPass, FakeMoney>(creator, object_address, index);
+        timestamp::update_global_time_for_test(2_000_000 + 86400_000_000);
+        complete<FreePizzaPass, FakeMoney>(creator, object_address, index);
 
         let records = borrow_global<TradingRecords<FakeMoney>>(object_address);
         assert!(!records.has_active, 1);
@@ -687,7 +681,7 @@ module token_objects_marketplace::tradings {
 
     #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
     #[expected_failure(abort_code = 327681, location = token_objects_marketplace::common)]
-    fun test_execute_fail_not_owner(creator: &signer, bidder: &signer, framework: &signer)
+    fun test_complete_fail_not_owner(creator: &signer, bidder: &signer, framework: &signer)
     acquires TradingRecords {
         setup_test_plus(creator, bidder, framework);
         create_test_money(creator, bidder, framework);
@@ -700,7 +694,7 @@ module token_objects_marketplace::tradings {
             obj,
             utf8(b"collection"), utf8(b"name"),
             false,
-            1,
+            1 + 86400,
             10
         );
 
@@ -709,17 +703,16 @@ module token_objects_marketplace::tradings {
             bidder,
             object_address,
             index,
-            1,
             20
         );
 
         timestamp::update_global_time_for_test(2_000_000);
-        execute<FreePizzaPass, FakeMoney>(bidder, object_address, index);
+        complete<FreePizzaPass, FakeMoney>(bidder, object_address, index);
     }
 
     #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
     #[expected_failure(abort_code = 65541, location = token_objects_marketplace::common)]
-    fun test_execute_fail_before_expiration(creator: &signer, bidder: &signer, framework: &signer)
+    fun test_complete_fail_before_expiration(creator: &signer, bidder: &signer, framework: &signer)
     acquires TradingRecords {
         setup_test_plus(creator, bidder, framework);
         create_test_money(creator, bidder, framework);
@@ -732,7 +725,7 @@ module token_objects_marketplace::tradings {
             obj,
             utf8(b"collection"), utf8(b"name"),
             false,
-            1,
+            1 + 86400,
             10
         );
 
@@ -741,41 +734,15 @@ module token_objects_marketplace::tradings {
             bidder,
             object_address,
             index,
-            1,
             20
         );
 
-        execute<FreePizzaPass, FakeMoney>(creator, object_address, index);
-    }
-
-    #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
-    #[expected_failure(abort_code = 851972, location = Self)]
-    fun test_execute_fail_no_bid(creator: &signer, bidder: &signer, framework: &signer)
-    acquires TradingRecords {
-        setup_test_plus(creator, bidder, framework);
-        create_test_money(creator, bidder, framework);
-        let cctor = create_test_object(creator);
-        let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
-        let ex = object::generate_extend_ref(&cctor);
-        init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
-        let index = start_trading<FreePizzaPass, FakeMoney>(
-            creator,
-            obj,
-            utf8(b"collection"), utf8(b"name"),
-            false,
-            1,
-            10
-        );
-
-        let object_address = object::object_address(&obj);
-
-        timestamp::update_global_time_for_test(2_000_000);
-        execute<FreePizzaPass, FakeMoney>(creator, object_address, index);
+        complete<FreePizzaPass, FakeMoney>(creator, object_address, index);
     }
 
     #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
     #[expected_failure(abort_code = 851970, location = Self)]
-    fun test_execute_fail_not_started(creator: &signer, bidder: &signer, framework: &signer)
+    fun test_complete_fail_not_started(creator: &signer, bidder: &signer, framework: &signer)
     acquires TradingRecords {
         setup_test_plus(creator, bidder, framework);
         create_test_money(creator, bidder, framework);
@@ -787,12 +754,12 @@ module token_objects_marketplace::tradings {
         let object_address = object::object_address(&obj);
 
         timestamp::update_global_time_for_test(2_000_000);
-        execute<FreePizzaPass, FakeMoney>(creator, object_address, 0);
+        complete<FreePizzaPass, FakeMoney>(creator, object_address, 0);
     }
 
     #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
     #[expected_failure]
-    fun test_execute_fail_wrong_obj(creator: &signer, bidder: &signer, framework: &signer)
+    fun test_complete_fail_wrong_obj(creator: &signer, bidder: &signer, framework: &signer)
     acquires TradingRecords {
         setup_test_plus(creator, bidder, framework);
         create_test_money(creator, bidder, framework);
@@ -805,7 +772,7 @@ module token_objects_marketplace::tradings {
             obj,
             utf8(b"collection"), utf8(b"name"),
             false,
-            1,
+            1 + 86400,
             10
         );
 
@@ -814,17 +781,16 @@ module token_objects_marketplace::tradings {
             bidder,
             object_address,
             index,
-            1,
             20
         );
 
         timestamp::update_global_time_for_test(2_000_000);
-        execute<FreePizzaPass, FakeMoney>(creator, @0x0b1, index);
+        complete<FreePizzaPass, FakeMoney>(creator, @0x0b1, index);
     }
 
     #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
     #[expected_failure]
-    fun test_execute_fail_wrong_idx(creator: &signer, bidder: &signer, framework: &signer)
+    fun test_complete_fail_wrong_idx(creator: &signer, bidder: &signer, framework: &signer)
     acquires TradingRecords {
         setup_test_plus(creator, bidder, framework);
         create_test_money(creator, bidder, framework);
@@ -837,7 +803,7 @@ module token_objects_marketplace::tradings {
             obj,
             utf8(b"collection"), utf8(b"name"),
             false,
-            1,
+            1 + 86400,
             10
         );
 
@@ -846,11 +812,10 @@ module token_objects_marketplace::tradings {
             bidder,
             object_address,
             index,
-            1,
             20
         );
 
         timestamp::update_global_time_for_test(2_000_000);
-        execute<FreePizzaPass, FakeMoney>(creator, object_address, 1);
+        complete<FreePizzaPass, FakeMoney>(creator, object_address, 1);
     }
 }

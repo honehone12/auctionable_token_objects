@@ -4,9 +4,13 @@ module token_objects_marketplace::bids {
     use std::vector;
     use std::option::{Self, Option};
     use aptos_std::table_with_length::{Self, TableWithLength};
+    use aptos_framework::timestamp;
     use aptos_framework::coin::{Self, Coin};
     use token_objects::royalty::{Self, Royalty};
     use token_objects_marketplace::common;
+
+    // withdraw after close
+    // simple map is enough
 
     const E_BID_ALREADY: u64 = 1;
     const E_UNEXPECTED_COIN_VALUE: u64 = 2; 
@@ -71,11 +75,34 @@ module token_objects_marketplace::bids {
         }
     }
 
+    public fun withdraw_from_expired<TCoin>(bidder: &signer)
+    acquires BidRecords {
+        let bidder_address = signer::address_of(bidder);
+        let records = borrow_global_mut<BidRecords<TCoin>>(bidder_address);
+
+        let coin = coin::zero<TCoin>();
+        let now = timestamp::now_seconds();
+        let i = 0;
+        let len = vector::length(&records.key_list);
+        while (i < len) {
+            let key = vector::borrow(&records.key_list, i);
+            let bid = table_with_length::borrow_mut(&mut records.bid_table, *key);
+            if (
+                bid.expiration_sec <= now &&
+                coin::value(&bid.coin) > 0
+            ) {
+                coin::merge(&mut coin, coin::extract_all(&mut bid.coin))
+            };
+            i = i + 1;  
+        };
+        coin::deposit(bidder_address, coin);
+    }
+
     public(friend) fun bid<TCoin>(
         bidder: &signer,
         object_address: address,
         index: u64,
-        expiration_sec: u64, // !!! range
+        expiration_sec: u64,
         bid_price: u64
     ): BidId
     acquires BidRecords {
@@ -131,8 +158,6 @@ module token_objects_marketplace::bids {
 
     #[test_only]
     use aptos_framework::account;
-    #[test_only]
-    use aptos_framework::timestamp;
     #[test_only]
     use aptos_framework::coin::FakeMoney;
 
