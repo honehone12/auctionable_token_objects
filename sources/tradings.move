@@ -8,7 +8,7 @@ module token_objects_marketplace::tradings {
     use aptos_framework::coin;
     use aptos_framework::timestamp;
     use aptos_framework::object::{Self, Object, ExtendRef};
-    use token_objects::royalty;
+    use aptos_token_objects::royalty;
     use token_objects_marketplace::common;
     use token_objects_marketplace::bids::{Self, BidId};
 
@@ -19,6 +19,10 @@ module token_objects_marketplace::tradings {
     const E_ALREADY_SOLD: u64 = 5;
 
     const MAX_WAIT_UNTIL_EXECUTION: u64 = 86400; // a day
+
+    // !!!
+    // it is simply possible that object is transfered while being listed
+    // bidder has to wait for about a month until withdraw in this case
 
     struct Trading<phantom TCoin> has store {
         min_price: u64,
@@ -172,9 +176,9 @@ module token_objects_marketplace::tradings {
     #[test_only]
     use aptos_framework::account;
     #[test_only]
-    use token_objects::token;
+    use aptos_token_objects::token;
     #[test_only]
-    use token_objects::collection;
+    use aptos_token_objects::collection;
 
     #[test_only]
     struct FreePizzaPass has key {}

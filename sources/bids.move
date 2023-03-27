@@ -6,10 +6,9 @@ module token_objects_marketplace::bids {
     use aptos_std::table_with_length::{Self, TableWithLength};
     use aptos_framework::timestamp;
     use aptos_framework::coin::{Self, Coin};
-    use token_objects::royalty::{Self, Royalty};
+    use aptos_token_objects::royalty::{Self, Royalty};
     use token_objects_marketplace::common;
 
-    // withdraw after close
     // simple map is enough
 
     const E_BID_ALREADY: u64 = 1;

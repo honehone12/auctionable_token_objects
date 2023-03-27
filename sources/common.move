@@ -4,7 +4,7 @@ module token_objects_marketplace::common {
     use aptos_framework::timestamp;
     use aptos_framework::coin;
     use aptos_framework::object::{Self, Object};
-    use token_objects::token;
+    use aptos_token_objects::token;
 
     const E_NOT_OWNER: u64 = 1;
     const E_INCONSISTENT_NAME: u64 = 2;
