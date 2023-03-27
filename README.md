@@ -1,5 +1,3 @@
 # auctionable_token_objects
-another implementation of marketplace for token objects written in move.  
-unique idea of this implementation is that auction resouces are stored in object's address.  
-this allow us start auction for token objects without central platform.  
-things are going to be much simplified for p2p trading, in game trading etc.
+started as another move implementation of marketplace for token objects with the testing idea of that auction resouces can be stored in object's address.  
+now i realize that it's nice that we can add a functionality as component to token objects this way.  
