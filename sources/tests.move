@@ -1,5 +1,5 @@
 #[test_only]
-module token_objects_marketplace::tests {
+module auctionable_token_objects::tests {
     use std::signer;
     use std::option;
     use std::string::utf8;
@@ -10,8 +10,8 @@ module token_objects_marketplace::tests {
     use aptos_token_objects::collection;
     use aptos_token_objects::token;
     use aptos_token_objects::royalty;
-    use token_objects_marketplace::tradings;
-    use token_objects_marketplace::bids;
+    use auctionable_token_objects::auctions;
+    use auctionable_token_objects::bids;
 
     struct FreePizzaPass has key {}
 
@@ -58,7 +58,7 @@ module token_objects_marketplace::tests {
         move_to(&object::generate_signer(&cctor), FreePizzaPass{});
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor); 
         let ex = object::generate_extend_ref(&cctor);
-        tradings::init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
+        auctions::init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         obj
     }
 
@@ -80,7 +80,7 @@ module token_objects_marketplace::tests {
         let obj = create_test_object(creator);
         let obj_addr = object::object_address(&obj);
         object::transfer(creator, obj, @0x123);
-        tradings::start_trading<FreePizzaPass, FakeMoney>(
+        auctions::start_auction<FreePizzaPass, FakeMoney>(
             owner,
             obj, 
             utf8(b"collection"), utf8(b"name"),
@@ -89,14 +89,14 @@ module token_objects_marketplace::tests {
             10
         );
 
-        tradings::bid<FreePizzaPass, FakeMoney>(
+        auctions::bid<FreePizzaPass, FakeMoney>(
             bidder_1,
             obj_addr,
             0,
             15
         );
 
-        tradings::bid<FreePizzaPass, FakeMoney>(
+        auctions::bid<FreePizzaPass, FakeMoney>(
             bidder_2,
             obj_addr,
             0,
@@ -104,7 +104,7 @@ module token_objects_marketplace::tests {
         );
 
         timestamp::update_global_time_for_test(6_000_000 + 86400_000_000);
-        tradings::complete<FreePizzaPass, FakeMoney>(
+        auctions::complete<FreePizzaPass, FakeMoney>(
             owner,
             obj_addr,
             0
@@ -139,7 +139,7 @@ module token_objects_marketplace::tests {
         let obj = create_test_object(creator);
         let obj_addr = object::object_address(&obj);
         object::transfer(creator, obj, @0x123);
-        tradings::start_trading<FreePizzaPass, FakeMoney>(
+        auctions::start_auction<FreePizzaPass, FakeMoney>(
             owner,
             obj, 
             utf8(b"collection"), utf8(b"name"),
@@ -148,7 +148,7 @@ module token_objects_marketplace::tests {
             10
         );
 
-        tradings::bid<FreePizzaPass, FakeMoney>(
+        auctions::bid<FreePizzaPass, FakeMoney>(
             bidder_2,
             obj_addr,
             0,
@@ -156,7 +156,7 @@ module token_objects_marketplace::tests {
         );
 
         timestamp::update_global_time_for_test(4_000_000 + 86400_000_000 + 86400_000_000);
-        tradings::complete<FreePizzaPass, FakeMoney>(
+        auctions::complete<FreePizzaPass, FakeMoney>(
             owner,
             obj_addr,
             0

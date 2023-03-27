@@ -8,4 +8,4 @@ AptosToken = { local = "../../aptos-core/aptos-move/framework/aptos-token" }
 AptosTokenObjects = { local = "../../aptos-core/aptos-move/framework/aptos-token-objects" }
 
 [addresses]
-token_objects_marketplace = "0xcafe"
+auctionable_token_objects = "0xcafe"

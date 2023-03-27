@@ -1,4 +1,4 @@
-module token_objects_marketplace::common {
+module auctionable_token_objects::common {
     use std::error;
     use std::string::String;
     use aptos_framework::timestamp;

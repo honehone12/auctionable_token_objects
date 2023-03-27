@@ -1,4 +1,4 @@
-module token_objects_marketplace::bids {
+module auctionable_token_objects::bids {
     use std::signer;
     use std::error;
     use std::vector;
@@ -7,14 +7,14 @@ module token_objects_marketplace::bids {
     use aptos_framework::timestamp;
     use aptos_framework::coin::{Self, Coin};
     use aptos_token_objects::royalty::{Self, Royalty};
-    use token_objects_marketplace::common;
+    use auctionable_token_objects::common;
 
     // simple map is enough
 
     const E_BID_ALREADY: u64 = 1;
     const E_UNEXPECTED_COIN_VALUE: u64 = 2; 
 
-    friend token_objects_marketplace::tradings;
+    friend auctionable_token_objects::auctions;
 
     struct BidId has store, copy, drop {
         bidder_address: address,
@@ -220,7 +220,7 @@ module token_objects_marketplace::bids {
     }
 
     #[test(bidder = @0x123, other = @234, framework = @0x1)]
-    #[expected_failure(abort_code = 65540, location = token_objects_marketplace::common)]
+    #[expected_failure(abort_code = 65540, location = auctionable_token_objects::common)]
     fun test_fail_bid_wrong_expiration(bidder: &signer, other: &signer, framework: &signer)
     acquires BidRecords {
         setup_test(bidder, other, framework);
@@ -232,7 +232,7 @@ module token_objects_marketplace::bids {
     }
 
     #[test(bidder = @0x123, other = @234, framework = @0x1)]
-    #[expected_failure(abort_code = 131075, location = token_objects_marketplace::common)]
+    #[expected_failure(abort_code = 131075, location = auctionable_token_objects::common)]
     fun test_fail_bid_zero(bidder: &signer, other: &signer, framework: &signer)
     acquires BidRecords {
         setup_test(bidder, other, framework);
@@ -243,7 +243,7 @@ module token_objects_marketplace::bids {
     }
 
     #[test(bidder = @0x123, other = @234, framework = @0x1)]
-    #[expected_failure(abort_code = 131075, location = token_objects_marketplace::common)]
+    #[expected_failure(abort_code = 131075, location = auctionable_token_objects::common)]
     fun test_fail_bid_max(bidder: &signer, other: &signer, framework: &signer)
     acquires BidRecords {
         setup_test(bidder, other, framework);
