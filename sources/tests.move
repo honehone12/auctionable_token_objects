@@ -92,22 +92,19 @@ module auctionable_token_objects::tests {
         auctions::bid<FreePizzaPass, FakeMoney>(
             bidder_1,
             obj_addr,
-            0,
             15
         );
 
         auctions::bid<FreePizzaPass, FakeMoney>(
             bidder_2,
             obj_addr,
-            0,
             20
         );
 
         timestamp::update_global_time_for_test(6_000_000 + 86400_000_000);
         auctions::complete<FreePizzaPass, FakeMoney>(
             owner,
-            obj_addr,
-            0
+            obj_addr
         );
 
         assert!(coin::balance<FakeMoney>(@0x123) == 118, 0);
@@ -151,7 +148,6 @@ module auctionable_token_objects::tests {
         auctions::bid<FreePizzaPass, FakeMoney>(
             bidder_2,
             obj_addr,
-            0,
             20
         );
 
@@ -159,7 +155,6 @@ module auctionable_token_objects::tests {
         auctions::complete<FreePizzaPass, FakeMoney>(
             owner,
             obj_addr,
-            0
         );
 
         assert!(object::is_owner(obj, @0x345), 4);

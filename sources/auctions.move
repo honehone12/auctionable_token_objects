@@ -4,7 +4,6 @@ module auctionable_token_objects::auctions {
     use std::vector;
     use std::string::String;
     use aptos_std::simple_map::{Self, SimpleMap};
-    use aptos_std::table_with_length::{Self, TableWithLength};
     use aptos_framework::coin;
     use aptos_framework::timestamp;
     use aptos_framework::object::{Self, Object, ExtendRef};
@@ -34,20 +33,16 @@ module auctionable_token_objects::auctions {
     #[resource_group(scope = global)]
     struct AuctionGroup {}
 
-    struct Auction<phantom TCoin> has store {
+    #[resource_group_member(group = AuctionGroup)]
+    struct Auction<phantom TCoin> has key {
         min_price: u64,
         is_instant_sale: bool,
         expiration_sec: u64,
 
         bid_map: SimpleMap<u64, BidId>,
-        bid_prices: vector<u64>
-    }
+        bid_prices: vector<u64>,
 
-    #[resource_group_member(group = AuctionGroup)]
-    struct AuctionRecords<phantom TCoin> has key {
-        index: u64,
-        auction_table: TableWithLength<u64, Auction<TCoin>>,
-        has_active: bool
+        is_active: bool
     }
     
     inline fun highest_price<TCoin>(auction: &Auction<TCoin>): u64 {
@@ -69,10 +64,13 @@ module auctionable_token_objects::auctions {
         let token_signer = object::generate_signer_for_extending(extend_ref);
         move_to(
             &token_signer,
-            AuctionRecords<TCoin>{
-                index: 0,
-                auction_table: table_with_length::new(),
-                has_active: false
+            Auction<TCoin>{
+                min_price: 0,
+                is_instant_sale: false,
+                expiration_sec: 0,
+                bid_map: simple_map::create(),
+                bid_prices: vector::empty(),
+                is_active: false
             }
         )
     }
@@ -85,51 +83,39 @@ module auctionable_token_objects::auctions {
         is_instant_sale: bool,
         expiration_sec: u64,
         min_price: u64
-    ): u64
-    acquires AuctionRecords {
+    )
+    acquires Auction {
         let owner_addr = signer::address_of(owner);
         common::assert_object_owner<T>(object, owner_addr);
         common::verify_token_object<T>(object, collection_name, token_name);
         common::verify_price_range(min_price);
         common::assert_expiration_range(expiration_sec);
         let obj_addr = object::object_address(&object);
-        let records = borrow_global_mut<AuctionRecords<TCoin>>(obj_addr);
-        assert!(!records.has_active, error::already_exists(E_ALREADY_ACTIVE));
-        let idx = records.index;
-        table_with_length::add(
-            &mut records.auction_table,
-            idx, Auction{
-                min_price,
-                is_instant_sale,
-                expiration_sec,
-                bid_map: simple_map::create(),
-                bid_prices: vector::empty()
-            }
-        );
-        records.index = idx + 1;
-        records.has_active = true;
-        idx
+        let auction = borrow_global_mut<Auction<TCoin>>(obj_addr);
+        assert!(!auction.is_active, error::already_exists(E_ALREADY_ACTIVE));
+        
+        auction.min_price = min_price;
+        auction.is_instant_sale = is_instant_sale;
+        auction.expiration_sec = expiration_sec;
+        auction.is_active = true;
     }
 
     public fun bid<T: key, TCoin>(
         bidder: &signer,
         object_address: address,
-        index: u64,
         bid_price: u64
     )
-    acquires AuctionRecords {
+    acquires Auction {
         let bidder_addr = signer::address_of(bidder); 
         common::assert_enough_balance<TCoin>(bidder_addr, bid_price);
         let obj = object::address_to_object<T>(object_address);
         common::assert_not_object_owner(obj, bidder_addr);
-        let records = borrow_global_mut<AuctionRecords<TCoin>>(object_address);
-        assert!(records.has_active, error::unavailable(E_NOT_ACTIVE));
-        let auction = table_with_length::borrow_mut(&mut records.auction_table, index);
+        let auction = borrow_global_mut<Auction<TCoin>>(object_address);
+        assert!(auction.is_active, error::unavailable(E_NOT_ACTIVE));
         common::assert_after_now(auction.expiration_sec);
         let bid_id = bids::bid<TCoin>(
             bidder,
             object_address,
-            index,
             auction.expiration_sec + MAX_WAIT_UNTIL_EXECUTION,
             bid_price
         );
@@ -147,33 +133,36 @@ module auctionable_token_objects::auctions {
 
     public fun complete<T: key, TCoin>(
         owner: &signer,
-        object_address: address,
-        index: u64,
+        object_address: address
     )
-    acquires AuctionRecords {
+    acquires Auction {
         let owner_address = signer::address_of(owner);
         let obj = object::address_to_object<T>(object_address);
         common::assert_object_owner(obj, owner_address);
-        let records = borrow_global_mut<AuctionRecords<TCoin>>(object_address);
-        assert!(records.has_active, error::unavailable(E_NOT_ACTIVE));
-        let auction = table_with_length::borrow_mut(&mut records.auction_table, index);
+        let auction = borrow_global_mut<Auction<TCoin>>(object_address);
+        assert!(auction.is_active, error::unavailable(E_NOT_ACTIVE));
         common::assert_before_now(auction.expiration_sec);
-        
-        if (
-            vector::length(&auction.bid_prices) > 0 && 
-            timestamp::now_seconds() < auction.expiration_sec + MAX_WAIT_UNTIL_EXECUTION  
-        ) {
-            let highest_price = highest_price(auction);
-            let bid_id = simple_map::borrow(&auction.bid_map, &highest_price);
-            let royalty = royalty::get(obj);
-            let coin = bids::execute_bid<TCoin>(*bid_id, royalty);
-            assert!(coin::value(&coin) > 0, error::resource_exhausted(E_EMPTY_COIN));
-            records.has_active = false;
-            object::transfer(owner, obj, bids::bidder(bid_id));
-            coin::deposit(owner_address, coin);
-        } else {
-            records.has_active = false;
-        }
+        let highest_price = highest_price(auction);
+        let bid_id = *simple_map::borrow(&auction.bid_map, &highest_price);
+        let deadline = auction.expiration_sec + MAX_WAIT_UNTIL_EXECUTION;
+
+        auction.min_price = 0;
+        auction.is_instant_sale = false;
+        auction.expiration_sec = 0;
+        auction.is_active = false;
+
+        if (vector::length(&auction.bid_prices) > 0) {
+            auction.bid_prices = vector::empty();
+            auction.bid_map = simple_map::create();
+
+            if (timestamp::now_seconds() < deadline) {
+                let royalty = royalty::get(obj);
+                let coin = bids::execute_bid<TCoin>(bid_id, royalty);
+                assert!(coin::value(&coin) > 0, error::resource_exhausted(E_EMPTY_COIN));
+                object::transfer(owner, obj, bids::bidder(&bid_id));
+                coin::deposit(owner_address, coin);
+            };
+        };
     }
 
     #[test_only]
@@ -244,7 +233,7 @@ module auctionable_token_objects::auctions {
         let obj_addr = object::object_address(&obj);
         let ex = object::generate_extend_ref(&cctor);
         init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
-        assert!(exists<AuctionRecords<FakeMoney>>(obj_addr), 0);
+        assert!(exists<Auction<FakeMoney>>(obj_addr), 0);
     }
 
     #[test(creator = @0x123)]
@@ -267,7 +256,7 @@ module auctionable_token_objects::auctions {
 
     #[test(creator = @0x123, framework = @0x1)]
     fun test_start_auction(creator: &signer, framework: &signer)
-    acquires AuctionRecords {
+    acquires Auction {
         setup_test(framework);
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
@@ -282,11 +271,8 @@ module auctionable_token_objects::auctions {
             1 + 86400,
             1
         );
-        let records = borrow_global<AuctionRecords<FakeMoney>>(obj_addr);
-        assert!(records.index == 1, 0);
-        assert!(records.has_active, 1);
-        assert!(table_with_length::contains(&records.auction_table, 0), 2);
-        let auction = table_with_length::borrow(&records.auction_table, 0);
+        let auction = borrow_global<Auction<FakeMoney>>(obj_addr);
+        assert!(auction.is_active, 1);
         assert!(auction.expiration_sec == 86401, 3);
         assert!(auction.min_price == 1, 3);
         assert!(!auction.is_instant_sale, 4);
@@ -295,7 +281,7 @@ module auctionable_token_objects::auctions {
     #[test(creator = @0x123, other = @0x234, framework = @0x1)]
     #[expected_failure(abort_code = 327681, location = auctionable_token_objects::common)]
     fun test_start_auction_fail_not_owner(creator: &signer, other: &signer, framework: &signer)
-    acquires AuctionRecords {
+    acquires Auction {
         setup_test(framework);
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
@@ -314,7 +300,7 @@ module auctionable_token_objects::auctions {
     #[test(creator = @0x123, framework = @0x1)]
     #[expected_failure(abort_code = 65538, location = auctionable_token_objects::common)]
     fun test_start_auction_fail_wrong_collection(creator: &signer, framework: &signer)
-    acquires AuctionRecords {
+    acquires Auction {
         setup_test(framework);
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
@@ -333,7 +319,7 @@ module auctionable_token_objects::auctions {
     #[test(creator = @0x123, framework = @0x1)]
     #[expected_failure(abort_code = 65538, location = auctionable_token_objects::common)]
     fun test_start_auction_fail_wrong_name(creator: &signer, framework: &signer)
-    acquires AuctionRecords {
+    acquires Auction {
         setup_test(framework);
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
@@ -352,7 +338,7 @@ module auctionable_token_objects::auctions {
     #[test(creator = @0x123, framework = @0x1)]
     #[expected_failure(abort_code = 131075, location = auctionable_token_objects::common)]
     fun test_start_auction_fail_price_zero(creator: &signer, framework: &signer)
-    acquires AuctionRecords {
+    acquires Auction {
         setup_test(framework);
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
@@ -371,7 +357,7 @@ module auctionable_token_objects::auctions {
     #[test(creator = @0x123, framework = @0x1)]
     #[expected_failure(abort_code = 131075, location = auctionable_token_objects::common)]
     fun test_start_auction_fail_price_max(creator: &signer, framework: &signer)
-    acquires AuctionRecords {
+    acquires Auction {
         setup_test(framework);
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
@@ -390,7 +376,7 @@ module auctionable_token_objects::auctions {
     #[test(creator = @0x123, framework = @0x1)]
     #[expected_failure(abort_code = 65544, location = auctionable_token_objects::common)]
     fun test_start_auction_fail_expire_in_past(creator: &signer, framework: &signer)
-    acquires AuctionRecords {
+    acquires Auction {
         setup_test(framework);
         timestamp::update_global_time_for_test(20_000_000 + 86400_000_000);
         let cctor = create_test_object(creator);
@@ -410,7 +396,7 @@ module auctionable_token_objects::auctions {
     #[test(creator = @0x123, framework = @0x1)]
     #[expected_failure(abort_code = 524289, location = Self)]
     fun test_start_auction_fail_start_twice(creator: &signer, framework: &signer)
-    acquires AuctionRecords {
+    acquires Auction {
         setup_test(framework);
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
@@ -437,7 +423,7 @@ module auctionable_token_objects::auctions {
 
     #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
     fun test_bid(creator: &signer, bidder: &signer, framework: &signer)
-    acquires AuctionRecords {
+    acquires Auction {
         setup_test_plus(creator, bidder, framework);
         create_test_money(creator, bidder, framework);
         let cctor = create_test_object(creator);
@@ -454,16 +440,13 @@ module auctionable_token_objects::auctions {
         );
 
         let object_address = object::object_address(&obj);
-        let index = 0;
         bid<FreePizzaPass, FakeMoney>(
             bidder,
             object_address,
-            index,
             20
         );
 
-        let records = borrow_global<AuctionRecords<FakeMoney>>(object_address);
-        let auction = table_with_length::borrow(&records.auction_table, index);
+        let auction = borrow_global<Auction<FakeMoney>>(object_address);
         assert!(vector::length(&auction.bid_prices) == 1, 0);
         assert!(simple_map::contains_key(&auction.bid_map, &20), 1);
         assert!(coin::balance<FakeMoney>(signer::address_of(bidder)) == 80, 2);
@@ -472,7 +455,7 @@ module auctionable_token_objects::auctions {
     #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
     #[expected_failure(abort_code = 65539, location = Self)]
     fun test_fail_bid_too_low(creator: &signer, bidder: &signer, framework: &signer)
-    acquires AuctionRecords {
+    acquires Auction {
         setup_test_plus(creator, bidder, framework);
         create_test_money(creator, bidder, framework);
         let cctor = create_test_object(creator);
@@ -489,11 +472,9 @@ module auctionable_token_objects::auctions {
         );
 
         let object_address = object::object_address(&obj);
-        let index = 0;
         bid<FreePizzaPass, FakeMoney>(
             bidder,
             object_address,
-            index,
             5
         );
     }
@@ -501,7 +482,7 @@ module auctionable_token_objects::auctions {
     #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
     #[expected_failure(abort_code = 327687, location = auctionable_token_objects::common)]
     fun test_fail_bid_owner(creator: &signer, bidder: &signer, framework: &signer)
-    acquires AuctionRecords {
+    acquires Auction {
         setup_test_plus(creator, bidder, framework);
         create_test_money(creator, bidder, framework);
         let cctor = create_test_object(creator);
@@ -518,11 +499,9 @@ module auctionable_token_objects::auctions {
         );
 
         let object_address = object::object_address(&obj);
-        let index = 0;
         bid<FreePizzaPass, FakeMoney>(
             creator,
             object_address,
-            index,
             20
         );
     }
@@ -530,7 +509,7 @@ module auctionable_token_objects::auctions {
     #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
     #[expected_failure(abort_code = 196614, location = auctionable_token_objects::common)]
     fun test_fail_bid_too_high(creator: &signer, bidder: &signer, framework: &signer)
-    acquires AuctionRecords {
+    acquires Auction {
         setup_test_plus(creator, bidder, framework);
         create_test_money(creator, bidder, framework);
         let cctor = create_test_object(creator);
@@ -547,11 +526,9 @@ module auctionable_token_objects::auctions {
         );
 
         let object_address = object::object_address(&obj);
-        let index = 0;
         bid<FreePizzaPass, FakeMoney>(
             bidder,
             object_address,
-            index,
             200
         );
     }
@@ -559,7 +536,7 @@ module auctionable_token_objects::auctions {
     #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
     #[expected_failure(abort_code = 65540, location = auctionable_token_objects::common)]
     fun test_fail_bid_expired(creator: &signer, bidder: &signer, framework: &signer)
-    acquires AuctionRecords {
+    acquires Auction {
         setup_test_plus(creator, bidder, framework);
         create_test_money(creator, bidder, framework);
         let cctor = create_test_object(creator);
@@ -578,11 +555,9 @@ module auctionable_token_objects::auctions {
         timestamp::update_global_time_for_test(2_000_000 + 86400_000_000);
 
         let object_address = object::object_address(&obj);
-        let index = 0;
         bid<FreePizzaPass, FakeMoney>(
             bidder,
             object_address,
-            index,
             20
         );
     }
@@ -590,7 +565,7 @@ module auctionable_token_objects::auctions {
     #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
     #[expected_failure(abort_code = 524289, location = auctionable_token_objects::bids)]
     fun test_fail_bid_same_price(creator: &signer, bidder: &signer, framework: &signer)
-    acquires AuctionRecords {
+    acquires Auction {
         setup_test_plus(creator, bidder, framework);
         create_test_money(creator, bidder, framework);
         let cctor = create_test_object(creator);
@@ -607,18 +582,15 @@ module auctionable_token_objects::auctions {
         );
 
         let object_address = object::object_address(&obj);
-        let index = 0;
         bid<FreePizzaPass, FakeMoney>(
             bidder,
             object_address,
-            index,
             20
         );
 
         bid<FreePizzaPass, FakeMoney>(
             bidder,
             object_address,
-            index,
             20
         );
     }
@@ -626,7 +598,7 @@ module auctionable_token_objects::auctions {
     #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
     #[expected_failure(abort_code = 851973, location = Self)]
     fun test_fail_bid_after_instant_sale(creator: &signer, bidder: &signer, framework: &signer)
-    acquires AuctionRecords {
+    acquires Auction {
         setup_test_plus(creator, bidder, framework);
         create_test_money(creator, bidder, framework);
         let cctor = create_test_object(creator);
@@ -643,32 +615,29 @@ module auctionable_token_objects::auctions {
         );
 
         let object_address = object::object_address(&obj);
-        let index = 0;
         bid<FreePizzaPass, FakeMoney>(
             bidder,
             object_address,
-            index,
             20
         );
 
         bid<FreePizzaPass, FakeMoney>(
             bidder,
             object_address,
-            index,
             30
         );
     }
     
     #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
     fun test_complete(creator: &signer, bidder: &signer, framework: &signer)
-    acquires AuctionRecords {
+    acquires Auction {
         setup_test_plus(creator, bidder, framework);
         create_test_money(creator, bidder, framework);
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
         init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
-        let index = start_auction<FreePizzaPass, FakeMoney>(
+        start_auction<FreePizzaPass, FakeMoney>(
             creator,
             obj,
             utf8(b"collection"), utf8(b"name"),
@@ -681,30 +650,75 @@ module auctionable_token_objects::auctions {
         bid<FreePizzaPass, FakeMoney>(
             bidder,
             object_address,
-            index,
             20
         );
 
         timestamp::update_global_time_for_test(2_000_000 + 86400_000_000);
-        complete<FreePizzaPass, FakeMoney>(creator, object_address, index);
+        complete<FreePizzaPass, FakeMoney>(creator, object_address);
 
-        let records = borrow_global<AuctionRecords<FakeMoney>>(object_address);
-        assert!(!records.has_active, 1);
+        let auction = borrow_global<Auction<FakeMoney>>(object_address);
+        assert!(!auction.is_active, 1);
         assert!(coin::balance<FakeMoney>(@0x123) == 120, 2);
-        assert!(coin::balance<FakeMoney>(@0x234) == 80, 2);
+        assert!(coin::balance<FakeMoney>(@0x234) == 80, 3);
+
+        assert!(auction.min_price == 0, 4);
+        assert!(auction.is_instant_sale == false, 5);
+        assert!(auction.expiration_sec == 0, 6);
+        assert!(simple_map::length(&auction.bid_map) == 0, 7);
+        assert!(vector::length(&auction.bid_prices) == 0, 8);
+    }
+
+    #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
+    fun test_complete_instant_sale(creator: &signer, bidder: &signer, framework: &signer)
+    acquires Auction {
+        setup_test_plus(creator, bidder, framework);
+        create_test_money(creator, bidder, framework);
+        let cctor = create_test_object(creator);
+        let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
+        let ex = object::generate_extend_ref(&cctor);
+        init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
+        start_auction<FreePizzaPass, FakeMoney>(
+            creator,
+            obj,
+            utf8(b"collection"), utf8(b"name"),
+            true,
+            1 + 86400,
+            10
+        );
+
+        let object_address = object::object_address(&obj);
+        bid<FreePizzaPass, FakeMoney>(
+            bidder,
+            object_address,
+            20
+        );
+
+        timestamp::update_global_time_for_test(2_000_000 + 86400_000_000);
+        complete<FreePizzaPass, FakeMoney>(creator, object_address);
+
+        let auction = borrow_global<Auction<FakeMoney>>(object_address);
+        assert!(!auction.is_active, 1);
+        assert!(coin::balance<FakeMoney>(@0x123) == 120, 2);
+        assert!(coin::balance<FakeMoney>(@0x234) == 80, 3);
+
+        assert!(auction.min_price == 0, 4);
+        assert!(auction.is_instant_sale == false, 5);
+        assert!(auction.expiration_sec == 0, 6);
+        assert!(simple_map::length(&auction.bid_map) == 0, 7);
+        assert!(vector::length(&auction.bid_prices) == 0, 8);
     }
 
     #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
     #[expected_failure(abort_code = 327681, location = auctionable_token_objects::common)]
     fun test_complete_fail_not_owner(creator: &signer, bidder: &signer, framework: &signer)
-    acquires AuctionRecords {
+    acquires Auction {
         setup_test_plus(creator, bidder, framework);
         create_test_money(creator, bidder, framework);
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
         init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
-        let index = start_auction<FreePizzaPass, FakeMoney>(
+        start_auction<FreePizzaPass, FakeMoney>(
             creator,
             obj,
             utf8(b"collection"), utf8(b"name"),
@@ -717,25 +731,24 @@ module auctionable_token_objects::auctions {
         bid<FreePizzaPass, FakeMoney>(
             bidder,
             object_address,
-            index,
             20
         );
 
         timestamp::update_global_time_for_test(2_000_000);
-        complete<FreePizzaPass, FakeMoney>(bidder, object_address, index);
+        complete<FreePizzaPass, FakeMoney>(bidder, object_address);
     }
 
     #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
     #[expected_failure(abort_code = 65541, location = auctionable_token_objects::common)]
     fun test_complete_fail_before_expiration(creator: &signer, bidder: &signer, framework: &signer)
-    acquires AuctionRecords {
+    acquires Auction {
         setup_test_plus(creator, bidder, framework);
         create_test_money(creator, bidder, framework);
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
         init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
-        let index = start_auction<FreePizzaPass, FakeMoney>(
+        start_auction<FreePizzaPass, FakeMoney>(
             creator,
             obj,
             utf8(b"collection"), utf8(b"name"),
@@ -748,17 +761,16 @@ module auctionable_token_objects::auctions {
         bid<FreePizzaPass, FakeMoney>(
             bidder,
             object_address,
-            index,
             20
         );
 
-        complete<FreePizzaPass, FakeMoney>(creator, object_address, index);
+        complete<FreePizzaPass, FakeMoney>(creator, object_address);
     }
 
     #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
     #[expected_failure(abort_code = 851970, location = Self)]
     fun test_complete_fail_not_started(creator: &signer, bidder: &signer, framework: &signer)
-    acquires AuctionRecords {
+    acquires Auction {
         setup_test_plus(creator, bidder, framework);
         create_test_money(creator, bidder, framework);
         let cctor = create_test_object(creator);
@@ -769,20 +781,20 @@ module auctionable_token_objects::auctions {
         let object_address = object::object_address(&obj);
 
         timestamp::update_global_time_for_test(2_000_000);
-        complete<FreePizzaPass, FakeMoney>(creator, object_address, 0);
+        complete<FreePizzaPass, FakeMoney>(creator, object_address);
     }
 
     #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
     #[expected_failure]
     fun test_complete_fail_wrong_obj(creator: &signer, bidder: &signer, framework: &signer)
-    acquires AuctionRecords {
+    acquires Auction {
         setup_test_plus(creator, bidder, framework);
         create_test_money(creator, bidder, framework);
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
         init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
-        let index = start_auction<FreePizzaPass, FakeMoney>(
+        start_auction<FreePizzaPass, FakeMoney>(
             creator,
             obj,
             utf8(b"collection"), utf8(b"name"),
@@ -795,42 +807,10 @@ module auctionable_token_objects::auctions {
         bid<FreePizzaPass, FakeMoney>(
             bidder,
             object_address,
-            index,
             20
         );
 
         timestamp::update_global_time_for_test(2_000_000);
-        complete<FreePizzaPass, FakeMoney>(creator, @0x0b1, index);
-    }
-
-    #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
-    #[expected_failure]
-    fun test_complete_fail_wrong_idx(creator: &signer, bidder: &signer, framework: &signer)
-    acquires AuctionRecords {
-        setup_test_plus(creator, bidder, framework);
-        create_test_money(creator, bidder, framework);
-        let cctor = create_test_object(creator);
-        let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
-        let ex = object::generate_extend_ref(&cctor);
-        init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
-        let index = start_auction<FreePizzaPass, FakeMoney>(
-            creator,
-            obj,
-            utf8(b"collection"), utf8(b"name"),
-            false,
-            1 + 86400,
-            10
-        );
-
-        let object_address = object::object_address(&obj);
-        bid<FreePizzaPass, FakeMoney>(
-            bidder,
-            object_address,
-            index,
-            20
-        );
-
-        timestamp::update_global_time_for_test(2_000_000);
-        complete<FreePizzaPass, FakeMoney>(creator, object_address, 1);
+        complete<FreePizzaPass, FakeMoney>(creator, @0x0b1);
     }
 }

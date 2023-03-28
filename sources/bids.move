@@ -3,13 +3,11 @@ module auctionable_token_objects::bids {
     use std::error;
     use std::vector;
     use std::option::{Self, Option};
-    use aptos_std::table_with_length::{Self, TableWithLength};
+    use aptos_std::simple_map::{Self, SimpleMap};
     use aptos_framework::timestamp;
     use aptos_framework::coin::{Self, Coin};
     use aptos_token_objects::royalty::{Self, Royalty};
     use auctionable_token_objects::common;
-
-    // simple map is enough
 
     const E_BID_ALREADY: u64 = 1;
     const E_UNEXPECTED_COIN_VALUE: u64 = 2; 
@@ -19,7 +17,6 @@ module auctionable_token_objects::bids {
     struct BidId has store, copy, drop {
         bidder_address: address,
         object_address: address,
-        index: u64,
         bid_price: u64,
     }
 
@@ -35,10 +32,6 @@ module auctionable_token_objects::bids {
         bid_id.bid_price
     }
 
-    public fun index(bid_id: &BidId): u64 {
-        bid_id.index
-    }
-
     struct Bid<phantom TCoin> has store {
         coin: Coin<TCoin>,
         expiration_sec: u64
@@ -46,7 +39,7 @@ module auctionable_token_objects::bids {
 
     struct BidRecords<phantom TCoin> has key {
         key_list: vector<BidId>,
-        bid_table: TableWithLength<BidId, Bid<TCoin>>
+        bid_map: SimpleMap<BidId, Bid<TCoin>>
     }
 
     inline fun init_bid_records<TCoin>(bidder: &signer) {
@@ -55,7 +48,7 @@ module auctionable_token_objects::bids {
                 bidder,
                 BidRecords<TCoin>{
                     key_list: vector::empty(),
-                    bid_table: table_with_length::new()
+                    bid_map: simple_map::create()
                 }
             )
         }
@@ -81,18 +74,24 @@ module auctionable_token_objects::bids {
 
         let coin = coin::zero<TCoin>();
         let now = timestamp::now_seconds();
-        let i = 0;
-        let len = vector::length(&records.key_list);
-        while (i < len) {
-            let key = vector::borrow(&records.key_list, i);
-            let bid = table_with_length::borrow_mut(&mut records.bid_table, *key);
-            if (
-                bid.expiration_sec <= now &&
-                coin::value(&bid.coin) > 0
-            ) {
-                coin::merge(&mut coin, coin::extract_all(&mut bid.coin))
+        let i = vector::length(&records.key_list);
+        while (i > 0) {
+            i = i - 1;
+            let k = vector::borrow(&mut records.key_list, i);
+            let b = simple_map::borrow(&mut records.bid_map, k);
+            if (b.expiration_sec <= now) {
+                let key = vector::remove(&mut records.key_list, i);
+                let (_, bid) = simple_map::remove(&mut records.bid_map, &key);
+                if (coin::value(&bid.coin) > 0) {
+                    coin::merge(&mut coin, coin::extract_all(&mut bid.coin));
+                };
+                
+                let Bid{
+                    coin: zero,
+                    expiration_sec: _
+                } = bid;
+                coin::destroy_zero(zero);
             };
-            i = i + 1;  
         };
         coin::deposit(bidder_address, coin);
     }
@@ -100,7 +99,6 @@ module auctionable_token_objects::bids {
     public(friend) fun bid<TCoin>(
         bidder: &signer,
         object_address: address,
-        index: u64,
         expiration_sec: u64,
         bid_price: u64
     ): BidId
@@ -113,18 +111,17 @@ module auctionable_token_objects::bids {
         let bid_id = BidId {
             bidder_address,
             object_address,
-            index,
             bid_price
         };
         assert!(
-            !table_with_length::contains(&records.bid_table, bid_id),
+            !simple_map::contains_key(&records.bid_map, &bid_id),
             error::already_exists(E_BID_ALREADY)
         );
         
         let coin = coin::withdraw<TCoin>(bidder, bid_price);
         vector::push_back(&mut records.key_list, bid_id);
-        table_with_length::add(
-            &mut records.bid_table, 
+        simple_map::add(
+            &mut records.bid_map, 
             bid_id, Bid{
                 coin,
                 expiration_sec
@@ -139,7 +136,7 @@ module auctionable_token_objects::bids {
     ): Coin<TCoin>
     acquires BidRecords {
         let records = borrow_global_mut<BidRecords<TCoin>>(bid_id.bidder_address);
-        let bid = table_with_length::borrow_mut(&mut records.bid_table, bid_id);
+        let bid = simple_map::borrow_mut(&mut records.bid_map, &bid_id);
         let stored_coin = coin::extract_all(&mut bid.coin);
         let stored_value = coin::value(&stored_coin);
         assert!(bid_id.bid_price == stored_value, error::internal(E_UNEXPECTED_COIN_VALUE));
@@ -185,13 +182,12 @@ module auctionable_token_objects::bids {
 
         let bidder_address = signer::address_of(bidder);
         let object_address = @0x0b1;
-        bid<FakeMoney>(bidder, object_address, 0, 1, 1);
+        bid<FakeMoney>(bidder, object_address, 1, 1);
         let records = borrow_global<BidRecords<FakeMoney>>(bidder_address);
         assert!(vector::length(&records.key_list) == 1, 0);
-        assert!(table_with_length::contains(&records.bid_table, BidId{
+        assert!(simple_map::contains_key(&records.bid_map, &BidId{
             bidder_address,
             object_address,
-            index: 0,
             bid_price: 1
         }), 1);
     }
@@ -204,8 +200,8 @@ module auctionable_token_objects::bids {
         create_test_money(bidder, other, framework);
 
         let object_address = @0x0b1;
-        bid<FakeMoney>(bidder, object_address, 0, 1, 1);
-        bid<FakeMoney>(bidder, object_address, 0, 1, 1);
+        bid<FakeMoney>(bidder, object_address, 1, 1);
+        bid<FakeMoney>(bidder, object_address, 1, 1);
     }
 
     #[test(bidder = @0x123, other = @234, framework = @0x1)]
@@ -216,7 +212,7 @@ module auctionable_token_objects::bids {
         create_test_money(bidder, other, framework);
 
         let object_address = @0x0b1;
-        bid<FakeMoney>(bidder, object_address, 0, 1, 101);
+        bid<FakeMoney>(bidder, object_address, 1, 101);
     }
 
     #[test(bidder = @0x123, other = @234, framework = @0x1)]
@@ -228,7 +224,7 @@ module auctionable_token_objects::bids {
         timestamp::update_global_time_for_test(2000_000);
 
         let object_address = @0x0b1;
-        bid<FakeMoney>(bidder, object_address, 0, 1, 1);
+        bid<FakeMoney>(bidder, object_address, 1, 1);
     }
 
     #[test(bidder = @0x123, other = @234, framework = @0x1)]
@@ -239,7 +235,7 @@ module auctionable_token_objects::bids {
         create_test_money(bidder, other, framework);
 
         let object_address = @0x0b1;
-        bid<FakeMoney>(bidder, object_address, 0, 1, 0);
+        bid<FakeMoney>(bidder, object_address, 1, 0);
     }
 
     #[test(bidder = @0x123, other = @234, framework = @0x1)]
@@ -250,7 +246,7 @@ module auctionable_token_objects::bids {
         create_test_money(bidder, other, framework);
 
         let object_address = @0x0b1;
-        bid<FakeMoney>(bidder, object_address, 0, 1, 0xffffffff_ffffffff);
+        bid<FakeMoney>(bidder, object_address, 1, 0xffffffff_ffffffff);
     }
 
     #[test(bidder = @0x123, other = @234, framework = @0x1)]
@@ -262,7 +258,7 @@ module auctionable_token_objects::bids {
         let other_address = signer::address_of(other);
         let bidder_address = signer::address_of(bidder);
         let object_address = @0x0b1;
-        let bid_id = bid<FakeMoney>(bidder, object_address, 0, 1, 100);
+        let bid_id = bid<FakeMoney>(bidder, object_address, 1, 100);
         
         let royalty = option::some(royalty::create(10, 100, other_address));
         let coin = execute_bid<FakeMoney>(bid_id, royalty);
@@ -282,7 +278,7 @@ module auctionable_token_objects::bids {
         let other_address = signer::address_of(other);
         let bidder_address = signer::address_of(bidder);
         let object_address = @0x0b1;
-        let bid_id = bid<FakeMoney>(bidder, object_address, 0, 1, 100);
+        let bid_id = bid<FakeMoney>(bidder, object_address, 1, 100);
         
         //let royalty = option::some(royalty::create(0, 100, other_address));
         let coin = execute_bid<FakeMoney>(bid_id, option::none());
@@ -302,11 +298,76 @@ module auctionable_token_objects::bids {
 
         let other_address = signer::address_of(other);
         let object_address = @0x0b1;
-        let bid_id = bid<FakeMoney>(bidder, object_address, 0, 1, 100);
+        let bid_id = bid<FakeMoney>(bidder, object_address, 1, 100);
         bid_id.object_address = @777;
 
         let royalty = option::some(royalty::create(10, 100, other_address));
         let coin = execute_bid<FakeMoney>(bid_id, royalty);
         coin::deposit(other_address, coin);
+    }
+
+    #[test(bidder = @0x123, other = @234, framework = @0x1)]
+    fun test_withdraw(bidder: &signer, other: &signer, framework: &signer)
+    acquires BidRecords {
+        setup_test(bidder, other, framework);
+        create_test_money(bidder, other, framework);
+
+        let bidder_address = signer::address_of(bidder);
+        let object_address = @0x0b1;
+        bid<FakeMoney>(bidder, object_address, 1, 100);
+
+        timestamp::update_global_time_for_test(2000_000);
+        
+        assert!(coin::balance<FakeMoney>(bidder_address) == 0, 0);
+        withdraw_from_expired<FakeMoney>(bidder);
+        assert!(coin::balance<FakeMoney>(bidder_address) == 100, 1);
+
+        {
+            let records = borrow_global_mut<BidRecords<FakeMoney>>(bidder_address);
+            assert!(vector::length(&records.key_list) == 0, 2);
+            assert!(simple_map::length(&records.bid_map) == 0, 3);
+        }
+    }
+
+    #[test(bidder = @0x123, other = @234, framework = @0x1)]
+    fun test_withdraw_2(bidder: &signer, other: &signer, framework: &signer)
+    acquires BidRecords {
+        setup_test(bidder, other, framework);
+        create_test_money(bidder, other, framework);
+
+        let bidder_address = signer::address_of(bidder);
+        let object_address = @0x0b1;
+        bid<FakeMoney>(bidder, object_address, 1, 10);
+        bid<FakeMoney>(bidder, object_address, 2, 20);
+        bid<FakeMoney>(bidder, object_address, 3, 30);
+        bid<FakeMoney>(bidder, object_address, 4, 40);
+
+        timestamp::update_global_time_for_test(3000_000);
+        
+        assert!(coin::balance<FakeMoney>(bidder_address) == 0, 0);
+        withdraw_from_expired<FakeMoney>(bidder);
+        assert!(coin::balance<FakeMoney>(bidder_address) == 60, 1);
+    
+        {
+            let records = borrow_global_mut<BidRecords<FakeMoney>>(bidder_address);
+            assert!(vector::length(&records.key_list) == 1, 2);
+            assert!(simple_map::length(&records.bid_map) == 1, 3);
+        }
+    }
+
+    #[test(bidder = @0x123, other = @234, framework = @0x1)]
+    #[expected_failure]
+    fun test_withdraw_fail(bidder: &signer, other: &signer, framework: &signer)
+    acquires BidRecords {
+        setup_test(bidder, other, framework);
+        create_test_money(bidder, other, framework);
+
+        let bidder_address = signer::address_of(bidder);
+        let object_address = @0x0b1;
+        bid<FakeMoney>(bidder, object_address, 1, 100);
+        
+        assert!(coin::balance<FakeMoney>(bidder_address) == 0, 0);
+        withdraw_from_expired<FakeMoney>(bidder);
+        assert!(coin::balance<FakeMoney>(bidder_address) == 100, 1);
     }
 }
