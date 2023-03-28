@@ -1,5 +1,5 @@
 [package]
-name = 'TokenObjectsMarketplace'
+name = 'AuctionableTokenObjects'
 version = '1.0.0'
 
 [dependencies]

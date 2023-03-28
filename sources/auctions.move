@@ -22,7 +22,17 @@ module auctionable_token_objects::auctions {
 
     // !!!
     // it is simply possible that object is transfered while being listed
-    // bidder has to wait for about a month until withdraw in this case
+    // bidder has to wait for about a month (max) until withdraw in this case
+
+    // !!!
+    // should instant sale be independent componet ??
+    // (no need to close any more)
+
+    // !!! 
+    // if bid is also independent module, we can reuse bid... 
+
+    #[resource_group(scope = global)]
+    struct AuctionGroup {}
 
     struct Auction<phantom TCoin> has store {
         min_price: u64,
@@ -33,7 +43,7 @@ module auctionable_token_objects::auctions {
         bid_prices: vector<u64>
     }
 
-    #[resource_group_member(group = object::ObjectGroup)]
+    #[resource_group_member(group = AuctionGroup)]
     struct AuctionRecords<phantom TCoin> has key {
         index: u64,
         auction_table: TableWithLength<u64, Auction<TCoin>>,
