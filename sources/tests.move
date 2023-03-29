@@ -58,7 +58,7 @@ module auctionable_token_objects::tests {
         move_to(&object::generate_signer(&cctor), FreePizzaPass{});
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor); 
         let ex = object::generate_extend_ref(&cctor);
-        auctions::init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
+        auctions::init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         obj
     }
 
@@ -84,7 +84,6 @@ module auctionable_token_objects::tests {
             owner,
             obj, 
             utf8(b"collection"), utf8(b"name"),
-            false,
             86400 + 5,
             10
         );
@@ -116,51 +115,5 @@ module auctionable_token_objects::tests {
         timestamp::update_global_time_for_test(6000_000 + 86400_000_000 + 86400_000_000);
         bids::withdraw_from_expired<FakeMoney>(bidder_1);
         assert!(coin::balance<FakeMoney>(@0x234) == 100, 5);
-    }
-
-    #[test(
-        owner = @0x123, 
-        bidder_1 = @0x234, 
-        bidder_2 = @0x345,  
-        creator = @0x456,
-        framework = @0x1
-    )]
-    fun test_instant_sale_happy_path(
-        owner: &signer, 
-        bidder_1: &signer, 
-        bidder_2: &signer,
-        creator: &signer, 
-        framework: &signer
-    ){
-        setup_test(owner, bidder_1, bidder_2, creator, framework);
-        let obj = create_test_object(creator);
-        let obj_addr = object::object_address(&obj);
-        object::transfer(creator, obj, @0x123);
-        auctions::start_auction<FreePizzaPass, FakeMoney>(
-            owner,
-            obj, 
-            utf8(b"collection"), utf8(b"name"),
-            true,
-            5 + 86400,
-            10
-        );
-
-        auctions::bid<FreePizzaPass, FakeMoney>(
-            bidder_2,
-            obj_addr,
-            20
-        );
-
-        timestamp::update_global_time_for_test(4_000_000 + 86400_000_000 + 86400_000_000);
-        auctions::complete<FreePizzaPass, FakeMoney>(
-            owner,
-            obj_addr,
-        );
-
-        assert!(object::is_owner(obj, @0x345), 4);
-        assert!(coin::balance<FakeMoney>(@0x123) == 118, 0);
-        assert!(coin::balance<FakeMoney>(@0x234) == 100, 1);
-        assert!(coin::balance<FakeMoney>(@0x345) == 80, 2);
-        assert!(coin::balance<FakeMoney>(@0x456) == 102, 3);
     }
 }

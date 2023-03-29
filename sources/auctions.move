@@ -3,6 +3,7 @@ module auctionable_token_objects::auctions {
     use std::error;
     use std::vector;
     use std::string::String;
+    use std::option::{Self, Option};
     use aptos_std::simple_map::{Self, SimpleMap};
     use aptos_framework::coin;
     use aptos_framework::timestamp;
@@ -16,33 +17,18 @@ module auctionable_token_objects::auctions {
     const E_PRICE_TOO_LOW: u64 = 3;
     const E_EMPTY_COIN: u64 = 4;
     const E_ALREADY_SOLD: u64 = 5;
+    const E_OWNER_CHANGED: u64 = 6;
 
     const MAX_WAIT_UNTIL_EXECUTION: u64 = 86400; // a day
 
-    // !!!
-    // it is simply possible that object is transfered while being listed
-    // bidder has to wait for about a month (max) until withdraw in this case
-
-    // !!!
-    // should instant sale be independent componet ??
-    // (no need to close any more)
-
-    // !!! 
-    // if bid is also independent module, we can reuse bid... 
-
-    #[resource_group(scope = global)]
-    struct AuctionGroup {}
-
-    #[resource_group_member(group = AuctionGroup)]
+    #[resource_group_member(group = object::ObjectGroup)]
     struct Auction<phantom TCoin> has key {
+        lister: Option<address>,
         min_price: u64,
-        is_instant_sale: bool,
         expiration_sec: u64,
 
         bid_map: SimpleMap<u64, BidId>,
-        bid_prices: vector<u64>,
-
-        is_active: bool
+        bid_prices: vector<u64>
     }
     
     inline fun highest_price<TCoin>(auction: &Auction<TCoin>): u64 {
@@ -54,7 +40,7 @@ module auctionable_token_objects::auctions {
         }
     }
 
-    public fun init_with_extend_ref<T: key, TCoin>(
+    public fun init_for_coin_type<T: key, TCoin>(
         extend_ref: &ExtendRef,
         object: Object<T>,
         collection_name: String,
@@ -65,12 +51,11 @@ module auctionable_token_objects::auctions {
         move_to(
             &token_signer,
             Auction<TCoin>{
+                lister: option::none(),
                 min_price: 0,
-                is_instant_sale: false,
                 expiration_sec: 0,
                 bid_map: simple_map::create(),
-                bid_prices: vector::empty(),
-                is_active: false
+                bid_prices: vector::empty()
             }
         )
     }
@@ -80,7 +65,6 @@ module auctionable_token_objects::auctions {
         object: Object<T>,
         collection_name: String,
         token_name: String,
-        is_instant_sale: bool,
         expiration_sec: u64,
         min_price: u64
     )
@@ -92,12 +76,11 @@ module auctionable_token_objects::auctions {
         common::assert_expiration_range(expiration_sec);
         let obj_addr = object::object_address(&object);
         let auction = borrow_global_mut<Auction<TCoin>>(obj_addr);
-        assert!(!auction.is_active, error::already_exists(E_ALREADY_ACTIVE));
+        assert!(option::is_none(&auction.lister), error::already_exists(E_ALREADY_ACTIVE));
         
         auction.min_price = min_price;
-        auction.is_instant_sale = is_instant_sale;
         auction.expiration_sec = expiration_sec;
-        auction.is_active = true;
+        auction.lister = option::some(owner_addr);
     }
 
     public fun bid<T: key, TCoin>(
@@ -111,8 +94,9 @@ module auctionable_token_objects::auctions {
         let obj = object::address_to_object<T>(object_address);
         common::assert_not_object_owner(obj, bidder_addr);
         let auction = borrow_global_mut<Auction<TCoin>>(object_address);
-        assert!(auction.is_active, error::unavailable(E_NOT_ACTIVE));
+        assert!(option::is_some(&auction.lister), error::unavailable(E_NOT_ACTIVE));
         common::assert_after_now(auction.expiration_sec);
+        assert!(bid_price > highest_price(auction), error::invalid_argument(E_PRICE_TOO_LOW));
         let bid_id = bids::bid<TCoin>(
             bidder,
             object_address,
@@ -120,13 +104,6 @@ module auctionable_token_objects::auctions {
             bid_price
         );
 
-        if (auction.is_instant_sale) {
-            assert!(bid_price >= auction.min_price, error::invalid_argument(E_PRICE_TOO_LOW));
-            assert!(vector::length(&auction.bid_prices) == 0, error::unavailable(E_ALREADY_SOLD));
-        } else {
-            assert!(bid_price > highest_price(auction), error::invalid_argument(E_PRICE_TOO_LOW));
-        };
-        
         vector::push_back(&mut auction.bid_prices, bid_price);
         simple_map::add(&mut auction.bid_map, bid_price, bid_id);
     }
@@ -136,37 +113,35 @@ module auctionable_token_objects::auctions {
         object_address: address
     )
     acquires Auction {
-        let owner_address = signer::address_of(owner);
+        let owner_addr = signer::address_of(owner);
         let obj = object::address_to_object<T>(object_address);
-        common::assert_object_owner(obj, owner_address);
+        common::assert_object_owner(obj, owner_addr);
         let auction = borrow_global_mut<Auction<TCoin>>(object_address);
-        assert!(auction.is_active, error::unavailable(E_NOT_ACTIVE));
+        assert!(option::is_some(&auction.lister), error::unavailable(E_NOT_ACTIVE));
         common::assert_before_now(auction.expiration_sec);
         let highest_price = highest_price(auction);
         let bid_id = *simple_map::borrow(&auction.bid_map, &highest_price);
         let deadline = auction.expiration_sec + MAX_WAIT_UNTIL_EXECUTION;
-
+        let lister = option::extract(&mut auction.lister);
+        
         auction.min_price = 0;
-        auction.is_instant_sale = false;
         auction.expiration_sec = 0;
-        auction.is_active = false;
 
         if (vector::length(&auction.bid_prices) > 0) {
             auction.bid_prices = vector::empty();
             auction.bid_map = simple_map::create();
 
             if (timestamp::now_seconds() < deadline) {
+                assert!(lister == owner_addr, error::internal(E_OWNER_CHANGED));
                 let royalty = royalty::get(obj);
                 let coin = bids::execute_bid<TCoin>(bid_id, royalty);
                 assert!(coin::value(&coin) > 0, error::resource_exhausted(E_EMPTY_COIN));
                 object::transfer(owner, obj, bids::bidder(&bid_id));
-                coin::deposit(owner_address, coin);
+                coin::deposit(owner_addr, coin);
             };
         };
     }
 
-    #[test_only]
-    use std::option;
     #[test_only]
     use std::string::utf8;
     #[test_only]
@@ -232,7 +207,7 @@ module auctionable_token_objects::auctions {
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let obj_addr = object::object_address(&obj);
         let ex = object::generate_extend_ref(&cctor);
-        init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
+        init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         assert!(exists<Auction<FakeMoney>>(obj_addr), 0);
     }
 
@@ -242,7 +217,7 @@ module auctionable_token_objects::auctions {
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
-        init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"bad-collection"), utf8(b"name"));
+        init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"bad-collection"), utf8(b"name"));
     }
 
     #[test(creator = @0x123)]
@@ -251,7 +226,7 @@ module auctionable_token_objects::auctions {
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
-        init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"bad-name"));
+        init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"bad-name"));
     }
 
     #[test(creator = @0x123, framework = @0x1)]
@@ -262,20 +237,18 @@ module auctionable_token_objects::auctions {
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let obj_addr = object::object_address(&obj);
         let ex = object::generate_extend_ref(&cctor);
-        init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
+        init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
             obj,
             utf8(b"collection"), utf8(b"name"),
-            false,
             1 + 86400,
             1
         );
         let auction = borrow_global<Auction<FakeMoney>>(obj_addr);
-        assert!(auction.is_active, 1);
+        assert!(auction.lister == option::some(@0x123), 1);
         assert!(auction.expiration_sec == 86401, 3);
         assert!(auction.min_price == 1, 3);
-        assert!(!auction.is_instant_sale, 4);
     }
 
     #[test(creator = @0x123, other = @0x234, framework = @0x1)]
@@ -286,12 +259,11 @@ module auctionable_token_objects::auctions {
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
-        init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
+        init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             other,
             obj,
             utf8(b"collection"), utf8(b"name"),
-            false,
             1 + 86400,
             1
         );
@@ -305,12 +277,11 @@ module auctionable_token_objects::auctions {
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
-        init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
+        init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
             obj,
             utf8(b"bad-collection"), utf8(b"name"),
-            false,
             1 + 86400,
             1
         );
@@ -324,12 +295,11 @@ module auctionable_token_objects::auctions {
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
-        init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
+        init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
             obj,
             utf8(b"collection"), utf8(b"bad-name"),
-            false,
             1 + 86400,
             1
         );
@@ -343,12 +313,11 @@ module auctionable_token_objects::auctions {
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
-        init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
+        init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
             obj,
             utf8(b"collection"), utf8(b"name"),
-            false,
             1 + 86400,
             0
         );
@@ -362,12 +331,11 @@ module auctionable_token_objects::auctions {
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
-        init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
+        init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
             obj,
             utf8(b"collection"), utf8(b"name"),
-            false,
             1 + 86400,
             0xffffffff_ffffffff
         );
@@ -382,12 +350,11 @@ module auctionable_token_objects::auctions {
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
-        init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
+        init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
             obj,
             utf8(b"collection"), utf8(b"name"),
-            false,
             1  + 86400,
             1
         );
@@ -401,12 +368,11 @@ module auctionable_token_objects::auctions {
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
-        init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
+        init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
             obj,
             utf8(b"collection"), utf8(b"name"),
-            false,
             1 + 86400,
             1
         );
@@ -415,7 +381,6 @@ module auctionable_token_objects::auctions {
             creator,
             obj,
             utf8(b"collection"), utf8(b"name"),
-            false,
             2 + 86400,
             2
         );
@@ -429,12 +394,11 @@ module auctionable_token_objects::auctions {
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
-        init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
+        init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
             obj,
             utf8(b"collection"), utf8(b"name"),
-            false,
             1 + 86400,
             10
         );
@@ -461,12 +425,11 @@ module auctionable_token_objects::auctions {
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
-        init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
+        init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
             obj,
             utf8(b"collection"), utf8(b"name"),
-            false,
             1 + 86400,
             10
         );
@@ -488,12 +451,11 @@ module auctionable_token_objects::auctions {
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
-        init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
+        init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
             obj,
             utf8(b"collection"), utf8(b"name"),
-            false,
             1  + 86400,
             10
         );
@@ -515,12 +477,11 @@ module auctionable_token_objects::auctions {
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
-        init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
+        init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
             obj,
             utf8(b"collection"), utf8(b"name"),
-            false,
             1 + 86400,
             10
         );
@@ -542,12 +503,11 @@ module auctionable_token_objects::auctions {
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
-        init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
+        init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
             obj,
             utf8(b"collection"), utf8(b"name"),
-            false,
             1 + 86400,
             10
         );
@@ -563,7 +523,7 @@ module auctionable_token_objects::auctions {
     }
 
     #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
-    #[expected_failure(abort_code = 524289, location = auctionable_token_objects::bids)]
+    #[expected_failure(abort_code = 65539, location = Self)]
     fun test_fail_bid_same_price(creator: &signer, bidder: &signer, framework: &signer)
     acquires Auction {
         setup_test_plus(creator, bidder, framework);
@@ -571,12 +531,11 @@ module auctionable_token_objects::auctions {
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
-        init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
+        init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
             obj,
             utf8(b"collection"), utf8(b"name"),
-            false,
             1 + 86400,
             10
         );
@@ -592,39 +551,6 @@ module auctionable_token_objects::auctions {
             bidder,
             object_address,
             20
-        );
-    }
-
-    #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
-    #[expected_failure(abort_code = 851973, location = Self)]
-    fun test_fail_bid_after_instant_sale(creator: &signer, bidder: &signer, framework: &signer)
-    acquires Auction {
-        setup_test_plus(creator, bidder, framework);
-        create_test_money(creator, bidder, framework);
-        let cctor = create_test_object(creator);
-        let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
-        let ex = object::generate_extend_ref(&cctor);
-        init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
-        start_auction<FreePizzaPass, FakeMoney>(
-            creator,
-            obj,
-            utf8(b"collection"), utf8(b"name"),
-            true,
-            1 + 86400,
-            10
-        );
-
-        let object_address = object::object_address(&obj);
-        bid<FreePizzaPass, FakeMoney>(
-            bidder,
-            object_address,
-            20
-        );
-
-        bid<FreePizzaPass, FakeMoney>(
-            bidder,
-            object_address,
-            30
         );
     }
     
@@ -636,12 +562,11 @@ module auctionable_token_objects::auctions {
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
-        init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
+        init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
             obj,
             utf8(b"collection"), utf8(b"name"),
-            false,
             1 + 86400,
             10
         );
@@ -657,52 +582,11 @@ module auctionable_token_objects::auctions {
         complete<FreePizzaPass, FakeMoney>(creator, object_address);
 
         let auction = borrow_global<Auction<FakeMoney>>(object_address);
-        assert!(!auction.is_active, 1);
         assert!(coin::balance<FakeMoney>(@0x123) == 120, 2);
         assert!(coin::balance<FakeMoney>(@0x234) == 80, 3);
 
         assert!(auction.min_price == 0, 4);
-        assert!(auction.is_instant_sale == false, 5);
-        assert!(auction.expiration_sec == 0, 6);
-        assert!(simple_map::length(&auction.bid_map) == 0, 7);
-        assert!(vector::length(&auction.bid_prices) == 0, 8);
-    }
-
-    #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
-    fun test_complete_instant_sale(creator: &signer, bidder: &signer, framework: &signer)
-    acquires Auction {
-        setup_test_plus(creator, bidder, framework);
-        create_test_money(creator, bidder, framework);
-        let cctor = create_test_object(creator);
-        let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
-        let ex = object::generate_extend_ref(&cctor);
-        init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
-        start_auction<FreePizzaPass, FakeMoney>(
-            creator,
-            obj,
-            utf8(b"collection"), utf8(b"name"),
-            true,
-            1 + 86400,
-            10
-        );
-
-        let object_address = object::object_address(&obj);
-        bid<FreePizzaPass, FakeMoney>(
-            bidder,
-            object_address,
-            20
-        );
-
-        timestamp::update_global_time_for_test(2_000_000 + 86400_000_000);
-        complete<FreePizzaPass, FakeMoney>(creator, object_address);
-
-        let auction = borrow_global<Auction<FakeMoney>>(object_address);
-        assert!(!auction.is_active, 1);
-        assert!(coin::balance<FakeMoney>(@0x123) == 120, 2);
-        assert!(coin::balance<FakeMoney>(@0x234) == 80, 3);
-
-        assert!(auction.min_price == 0, 4);
-        assert!(auction.is_instant_sale == false, 5);
+        assert!(option::is_none(&auction.lister), 5);
         assert!(auction.expiration_sec == 0, 6);
         assert!(simple_map::length(&auction.bid_map) == 0, 7);
         assert!(vector::length(&auction.bid_prices) == 0, 8);
@@ -717,12 +601,11 @@ module auctionable_token_objects::auctions {
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
-        init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
+        init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
             obj,
             utf8(b"collection"), utf8(b"name"),
-            false,
             1 + 86400,
             10
         );
@@ -747,12 +630,11 @@ module auctionable_token_objects::auctions {
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
-        init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
+        init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
             obj,
             utf8(b"collection"), utf8(b"name"),
-            false,
             1 + 86400,
             10
         );
@@ -776,7 +658,7 @@ module auctionable_token_objects::auctions {
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
-        init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
+        init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
 
         let object_address = object::object_address(&obj);
 
@@ -793,12 +675,11 @@ module auctionable_token_objects::auctions {
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
-        init_with_extend_ref<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
+        init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
             obj,
             utf8(b"collection"), utf8(b"name"),
-            false,
             1 + 86400,
             10
         );
