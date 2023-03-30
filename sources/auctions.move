@@ -167,9 +167,7 @@ module auctionable_token_objects::auctions {
                 let coin = bids::execute_bid<TCoin>(bid_id, royalty);
                 assert!(coin::value(&coin) > 0, error::resource_exhausted(E_EMPTY_COIN));
                 
-                let linear_transfer = object::generate_linear_transfer_ref(
-                    components_common::transfer_ref(option::borrow(&transfer_config.transfer_key))
-                );
+                let linear_transfer = components_common::generate_linear_transfer_ref(option::borrow(&transfer_config.transfer_key));
                 object::transfer_with_ref(linear_transfer, bids::bidder(&bid_id));
                 
                 coin::deposit(owner_addr, coin);
