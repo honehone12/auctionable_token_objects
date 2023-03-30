@@ -12,6 +12,7 @@ module auctionable_token_objects::tests {
     use aptos_token_objects::royalty;
     use auctionable_token_objects::auctions;
     use auctionable_token_objects::bids;
+    use components_common::components_common::{Self, TransferKey};
 
     struct FreePizzaPass has key {}
 
@@ -39,7 +40,7 @@ module auctionable_token_objects::tests {
         coin::transfer<FakeMoney>(framework, @0x456, 100);
     }
 
-    fun create_test_object(creator: &signer): Object<FreePizzaPass> {
+    fun create_test_object(creator: &signer): (Object<FreePizzaPass>, TransferKey) {
         _ = collection::create_untracked_collection(
             creator,
             utf8(b"collection description"),
@@ -58,8 +59,9 @@ module auctionable_token_objects::tests {
         move_to(&object::generate_signer(&cctor), FreePizzaPass{});
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor); 
         let ex = object::generate_extend_ref(&cctor);
+        let key = components_common::create_transfer_key(&cctor);
         auctions::init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
-        obj
+        (obj, key)
     }
 
     #[test(
@@ -77,33 +79,32 @@ module auctionable_token_objects::tests {
         framework: &signer
     ){
         setup_test(owner, bidder_1, bidder_2, creator, framework);
-        let obj = create_test_object(creator);
-        let obj_addr = object::object_address(&obj);
+        let (obj, key) = create_test_object(creator);
         object::transfer(creator, obj, @0x123);
         auctions::start_auction<FreePizzaPass, FakeMoney>(
             owner,
+            key,
             obj, 
-            utf8(b"collection"), utf8(b"name"),
             86400 + 5,
             10
         );
 
         auctions::bid<FreePizzaPass, FakeMoney>(
             bidder_1,
-            obj_addr,
+            obj,
             15
         );
 
         auctions::bid<FreePizzaPass, FakeMoney>(
             bidder_2,
-            obj_addr,
+            obj,
             20
         );
 
         timestamp::update_global_time_for_test(6_000_000 + 86400_000_000);
-        auctions::complete<FreePizzaPass, FakeMoney>(
+        let ret = auctions::complete<FreePizzaPass, FakeMoney>(
             owner,
-            obj_addr
+            obj
         );
 
         assert!(coin::balance<FakeMoney>(@0x123) == 118, 0);
@@ -115,5 +116,7 @@ module auctionable_token_objects::tests {
         timestamp::update_global_time_for_test(6000_000 + 86400_000_000 + 86400_000_000);
         bids::withdraw_from_expired<FakeMoney>(bidder_1);
         assert!(coin::balance<FakeMoney>(@0x234) == 100, 5);
+
+        components_common::destroy_for_test(ret);
     }
 }

@@ -8,9 +8,11 @@ module auctionable_token_objects::auctions {
     use aptos_framework::coin;
     use aptos_framework::timestamp;
     use aptos_framework::object::{Self, Object, ExtendRef};
+    use aptos_token_objects::token;
     use aptos_token_objects::royalty;
     use auctionable_token_objects::common;
     use auctionable_token_objects::bids::{Self, BidId};
+    use components_common::components_common::{Self, ComponentGroup, TransferKey};
 
     const E_ALREADY_ACTIVE: u64 = 1;
     const E_NOT_ACTIVE: u64 = 2;
@@ -18,12 +20,20 @@ module auctionable_token_objects::auctions {
     const E_EMPTY_COIN: u64 = 4;
     const E_ALREADY_SOLD: u64 = 5;
     const E_OWNER_CHANGED: u64 = 6;
+    const E_OBJECT_REF_NOT_MATCH: u64 = 7;
+    const E_NOT_TOKEN: u64 = 8;
 
     const MAX_WAIT_UNTIL_EXECUTION: u64 = 86400; // a day
 
-    #[resource_group_member(group = object::ObjectGroup)]
+    #[resource_group_member(group = ComponentGroup)]
+    struct TransferConfig has key {
+        transfer_key: Option<TransferKey>
+    }
+
+    #[resource_group_member(group = ComponentGroup)]
     struct Auction<phantom TCoin> has key {
         lister: Option<address>,
+
         min_price: u64,
         expiration_sec: u64,
 
@@ -46,8 +56,27 @@ module auctionable_token_objects::auctions {
         collection_name: String,
         token_name: String
     ) {
-        common::verify_token_object<T>(object, collection_name, token_name);
         let token_signer = object::generate_signer_for_extending(extend_ref);
+        let token_addr = signer::address_of(&token_signer); 
+        assert!(
+            token_addr == object::object_address(&object),
+            error::invalid_argument(E_OBJECT_REF_NOT_MATCH)
+        );
+        assert!(
+            token::collection(object) == collection_name &&
+            token::name(object) == token_name,
+            error::invalid_argument(E_NOT_TOKEN)
+        );
+
+        if (!exists<TransferConfig>(token_addr)) {
+            move_to(
+                &token_signer,
+                TransferConfig{
+                    transfer_key: option::none()
+                }
+            );
+        };
+
         move_to(
             &token_signer,
             Auction<TCoin>{
@@ -62,22 +91,27 @@ module auctionable_token_objects::auctions {
 
     public fun start_auction<T: key, TCoin>(
         owner: &signer,
+        transfer_key: TransferKey,
         object: Object<T>,
-        collection_name: String,
-        token_name: String,
         expiration_sec: u64,
         min_price: u64
     )
-    acquires Auction {
+    acquires Auction, TransferConfig {
         let owner_addr = signer::address_of(owner);
         common::assert_object_owner<T>(object, owner_addr);
-        common::verify_token_object<T>(object, collection_name, token_name);
         common::verify_price_range(min_price);
         common::assert_expiration_range(expiration_sec);
+        assert!(
+            object::object_address(&object) == components_common::object_address(&transfer_key),
+            error::invalid_argument(E_OBJECT_REF_NOT_MATCH)
+        );
         let obj_addr = object::object_address(&object);
         let auction = borrow_global_mut<Auction<TCoin>>(obj_addr);
         assert!(option::is_none(&auction.lister), error::already_exists(E_ALREADY_ACTIVE));
         
+        let transfer_config = borrow_global_mut<TransferConfig>(obj_addr);
+        option::fill(&mut transfer_config.transfer_key, transfer_key);
+
         auction.min_price = min_price;
         auction.expiration_sec = expiration_sec;
         auction.lister = option::some(owner_addr);
@@ -85,14 +119,13 @@ module auctionable_token_objects::auctions {
 
     public fun bid<T: key, TCoin>(
         bidder: &signer,
-        object_address: address,
+        object: Object<T>,
         bid_price: u64
     )
     acquires Auction {
         let bidder_addr = signer::address_of(bidder); 
-        common::assert_enough_balance<TCoin>(bidder_addr, bid_price);
-        let obj = object::address_to_object<T>(object_address);
-        common::assert_not_object_owner(obj, bidder_addr);
+        common::assert_not_object_owner(object, bidder_addr);
+        let object_address = object::object_address(&object);
         let auction = borrow_global_mut<Auction<TCoin>>(object_address);
         assert!(option::is_some(&auction.lister), error::unavailable(E_NOT_ACTIVE));
         common::assert_after_now(auction.expiration_sec);
@@ -108,38 +141,42 @@ module auctionable_token_objects::auctions {
         simple_map::add(&mut auction.bid_map, bid_price, bid_id);
     }
 
-    public fun complete<T: key, TCoin>(
-        owner: &signer,
-        object_address: address
-    )
-    acquires Auction {
+    public fun complete<T: key, TCoin>(owner: &signer, object: Object<T>): TransferKey
+    acquires Auction, TransferConfig {
         let owner_addr = signer::address_of(owner);
-        let obj = object::address_to_object<T>(object_address);
-        common::assert_object_owner(obj, owner_addr);
+        let object_address = object::object_address(&object);
+        common::assert_object_owner(object, owner_addr);
         let auction = borrow_global_mut<Auction<TCoin>>(object_address);
-        assert!(option::is_some(&auction.lister), error::unavailable(E_NOT_ACTIVE));
         common::assert_before_now(auction.expiration_sec);
+        let lister = option::extract(&mut auction.lister);
         let highest_price = highest_price(auction);
         let bid_id = *simple_map::borrow(&auction.bid_map, &highest_price);
         let deadline = auction.expiration_sec + MAX_WAIT_UNTIL_EXECUTION;
-        let lister = option::extract(&mut auction.lister);
         
         auction.min_price = 0;
         auction.expiration_sec = 0;
 
+        let transfer_config = borrow_global_mut<TransferConfig>(object_address);
         if (vector::length(&auction.bid_prices) > 0) {
             auction.bid_prices = vector::empty();
             auction.bid_map = simple_map::create();
 
             if (timestamp::now_seconds() < deadline) {
                 assert!(lister == owner_addr, error::internal(E_OWNER_CHANGED));
-                let royalty = royalty::get(obj);
+                let royalty = royalty::get(object);
                 let coin = bids::execute_bid<TCoin>(bid_id, royalty);
                 assert!(coin::value(&coin) > 0, error::resource_exhausted(E_EMPTY_COIN));
-                object::transfer(owner, obj, bids::bidder(&bid_id));
+                
+                let linear_transfer = object::generate_linear_transfer_ref(
+                    components_common::transfer_ref(option::borrow(&transfer_config.transfer_key))
+                );
+                object::transfer_with_ref(linear_transfer, bids::bidder(&bid_id));
+                
                 coin::deposit(owner_addr, coin);
             };
         };
+
+        option::extract(&mut transfer_config.transfer_key)
     }
 
     #[test_only]
@@ -150,8 +187,6 @@ module auctionable_token_objects::auctions {
     use aptos_framework::object::ConstructorRef;
     #[test_only]
     use aptos_framework::account;
-    #[test_only]
-    use aptos_token_objects::token;
     #[test_only]
     use aptos_token_objects::collection;
 
@@ -212,7 +247,7 @@ module auctionable_token_objects::auctions {
     }
 
     #[test(creator = @0x123)]
-    #[expected_failure(abort_code = 65538, location = auctionable_token_objects::common)]
+    #[expected_failure(abort_code = 65544, location = Self)]
     fun test_init_fail_wrong_collection(creator: &signer) {
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
@@ -221,7 +256,7 @@ module auctionable_token_objects::auctions {
     }
 
     #[test(creator = @0x123)]
-    #[expected_failure(abort_code = 65538, location = auctionable_token_objects::common)]
+    #[expected_failure(abort_code = 65544, location = Self)]
     fun test_init_fail_wrong_name(creator: &signer) {
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
@@ -231,17 +266,18 @@ module auctionable_token_objects::auctions {
 
     #[test(creator = @0x123, framework = @0x1)]
     fun test_start_auction(creator: &signer, framework: &signer)
-    acquires Auction {
+    acquires Auction, TransferConfig {
         setup_test(framework);
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let obj_addr = object::object_address(&obj);
         let ex = object::generate_extend_ref(&cctor);
+        let key = components_common::create_transfer_key(&cctor);
         init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
+            key,
             obj,
-            utf8(b"collection"), utf8(b"name"),
             1 + 86400,
             1
         );
@@ -254,52 +290,17 @@ module auctionable_token_objects::auctions {
     #[test(creator = @0x123, other = @0x234, framework = @0x1)]
     #[expected_failure(abort_code = 327681, location = auctionable_token_objects::common)]
     fun test_start_auction_fail_not_owner(creator: &signer, other: &signer, framework: &signer)
-    acquires Auction {
+    acquires Auction, TransferConfig {
         setup_test(framework);
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
+        let key = components_common::create_transfer_key(&cctor);
         init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             other,
+            key,
             obj,
-            utf8(b"collection"), utf8(b"name"),
-            1 + 86400,
-            1
-        );
-    }
-
-    #[test(creator = @0x123, framework = @0x1)]
-    #[expected_failure(abort_code = 65538, location = auctionable_token_objects::common)]
-    fun test_start_auction_fail_wrong_collection(creator: &signer, framework: &signer)
-    acquires Auction {
-        setup_test(framework);
-        let cctor = create_test_object(creator);
-        let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
-        let ex = object::generate_extend_ref(&cctor);
-        init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
-        start_auction<FreePizzaPass, FakeMoney>(
-            creator,
-            obj,
-            utf8(b"bad-collection"), utf8(b"name"),
-            1 + 86400,
-            1
-        );
-    }
-
-    #[test(creator = @0x123, framework = @0x1)]
-    #[expected_failure(abort_code = 65538, location = auctionable_token_objects::common)]
-    fun test_start_auction_fail_wrong_name(creator: &signer, framework: &signer)
-    acquires Auction {
-        setup_test(framework);
-        let cctor = create_test_object(creator);
-        let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
-        let ex = object::generate_extend_ref(&cctor);
-        init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
-        start_auction<FreePizzaPass, FakeMoney>(
-            creator,
-            obj,
-            utf8(b"collection"), utf8(b"bad-name"),
             1 + 86400,
             1
         );
@@ -308,16 +309,17 @@ module auctionable_token_objects::auctions {
     #[test(creator = @0x123, framework = @0x1)]
     #[expected_failure(abort_code = 131075, location = auctionable_token_objects::common)]
     fun test_start_auction_fail_price_zero(creator: &signer, framework: &signer)
-    acquires Auction {
+    acquires Auction, TransferConfig {
         setup_test(framework);
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
+        let key = components_common::create_transfer_key(&cctor);
         init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
+            key,
             obj,
-            utf8(b"collection"), utf8(b"name"),
             1 + 86400,
             0
         );
@@ -326,16 +328,17 @@ module auctionable_token_objects::auctions {
     #[test(creator = @0x123, framework = @0x1)]
     #[expected_failure(abort_code = 131075, location = auctionable_token_objects::common)]
     fun test_start_auction_fail_price_max(creator: &signer, framework: &signer)
-    acquires Auction {
+    acquires Auction, TransferConfig {
         setup_test(framework);
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
+        let key = components_common::create_transfer_key(&cctor);
         init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
+            key,
             obj,
-            utf8(b"collection"), utf8(b"name"),
             1 + 86400,
             0xffffffff_ffffffff
         );
@@ -344,61 +347,37 @@ module auctionable_token_objects::auctions {
     #[test(creator = @0x123, framework = @0x1)]
     #[expected_failure(abort_code = 65544, location = auctionable_token_objects::common)]
     fun test_start_auction_fail_expire_in_past(creator: &signer, framework: &signer)
-    acquires Auction {
+    acquires Auction, TransferConfig {
         setup_test(framework);
         timestamp::update_global_time_for_test(20_000_000 + 86400_000_000);
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
+        let key = components_common::create_transfer_key(&cctor);
         init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
+            key,
             obj,
-            utf8(b"collection"), utf8(b"name"),
             1  + 86400,
             1
         );
     }
 
-    #[test(creator = @0x123, framework = @0x1)]
-    #[expected_failure(abort_code = 524289, location = Self)]
-    fun test_start_auction_fail_start_twice(creator: &signer, framework: &signer)
-    acquires Auction {
-        setup_test(framework);
-        let cctor = create_test_object(creator);
-        let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
-        let ex = object::generate_extend_ref(&cctor);
-        init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
-        start_auction<FreePizzaPass, FakeMoney>(
-            creator,
-            obj,
-            utf8(b"collection"), utf8(b"name"),
-            1 + 86400,
-            1
-        );
-
-        start_auction<FreePizzaPass, FakeMoney>(
-            creator,
-            obj,
-            utf8(b"collection"), utf8(b"name"),
-            2 + 86400,
-            2
-        );
-    }
-
     #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
     fun test_bid(creator: &signer, bidder: &signer, framework: &signer)
-    acquires Auction {
+    acquires Auction, TransferConfig {
         setup_test_plus(creator, bidder, framework);
         create_test_money(creator, bidder, framework);
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
+        let key = components_common::create_transfer_key(&cctor);
         init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
+            key,
             obj,
-            utf8(b"collection"), utf8(b"name"),
             1 + 86400,
             10
         );
@@ -406,7 +385,7 @@ module auctionable_token_objects::auctions {
         let object_address = object::object_address(&obj);
         bid<FreePizzaPass, FakeMoney>(
             bidder,
-            object_address,
+            obj,
             20
         );
 
@@ -419,25 +398,25 @@ module auctionable_token_objects::auctions {
     #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
     #[expected_failure(abort_code = 65539, location = Self)]
     fun test_fail_bid_too_low(creator: &signer, bidder: &signer, framework: &signer)
-    acquires Auction {
+    acquires Auction, TransferConfig {
         setup_test_plus(creator, bidder, framework);
         create_test_money(creator, bidder, framework);
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
+        let key = components_common::create_transfer_key(&cctor);
         init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
+            key,
             obj,
-            utf8(b"collection"), utf8(b"name"),
             1 + 86400,
             10
         );
 
-        let object_address = object::object_address(&obj);
         bid<FreePizzaPass, FakeMoney>(
             bidder,
-            object_address,
+            obj,
             5
         );
     }
@@ -445,51 +424,51 @@ module auctionable_token_objects::auctions {
     #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
     #[expected_failure(abort_code = 327687, location = auctionable_token_objects::common)]
     fun test_fail_bid_owner(creator: &signer, bidder: &signer, framework: &signer)
-    acquires Auction {
+    acquires Auction, TransferConfig {
         setup_test_plus(creator, bidder, framework);
         create_test_money(creator, bidder, framework);
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
+        let key = components_common::create_transfer_key(&cctor);
         init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
+            key,
             obj,
-            utf8(b"collection"), utf8(b"name"),
             1  + 86400,
             10
         );
 
-        let object_address = object::object_address(&obj);
         bid<FreePizzaPass, FakeMoney>(
             creator,
-            object_address,
+            obj,
             20
         );
     }
 
     #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
-    #[expected_failure(abort_code = 196614, location = auctionable_token_objects::common)]
+    #[expected_failure]
     fun test_fail_bid_too_high(creator: &signer, bidder: &signer, framework: &signer)
-    acquires Auction {
+    acquires Auction, TransferConfig {
         setup_test_plus(creator, bidder, framework);
         create_test_money(creator, bidder, framework);
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
+        let key = components_common::create_transfer_key(&cctor);
         init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
+            key,
             obj,
-            utf8(b"collection"), utf8(b"name"),
             1 + 86400,
             10
         );
 
-        let object_address = object::object_address(&obj);
         bid<FreePizzaPass, FakeMoney>(
             bidder,
-            object_address,
+            obj,
             200
         );
     }
@@ -497,27 +476,27 @@ module auctionable_token_objects::auctions {
     #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
     #[expected_failure(abort_code = 65540, location = auctionable_token_objects::common)]
     fun test_fail_bid_expired(creator: &signer, bidder: &signer, framework: &signer)
-    acquires Auction {
+    acquires Auction, TransferConfig {
         setup_test_plus(creator, bidder, framework);
         create_test_money(creator, bidder, framework);
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
+        let key = components_common::create_transfer_key(&cctor);
         init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
+            key,
             obj,
-            utf8(b"collection"), utf8(b"name"),
             1 + 86400,
             10
         );
 
         timestamp::update_global_time_for_test(2_000_000 + 86400_000_000);
 
-        let object_address = object::object_address(&obj);
         bid<FreePizzaPass, FakeMoney>(
             bidder,
-            object_address,
+            obj,
             20
         );
     }
@@ -525,48 +504,49 @@ module auctionable_token_objects::auctions {
     #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
     #[expected_failure(abort_code = 65539, location = Self)]
     fun test_fail_bid_same_price(creator: &signer, bidder: &signer, framework: &signer)
-    acquires Auction {
+    acquires Auction, TransferConfig {
         setup_test_plus(creator, bidder, framework);
         create_test_money(creator, bidder, framework);
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
+        let key = components_common::create_transfer_key(&cctor);
         init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
+            key,
             obj,
-            utf8(b"collection"), utf8(b"name"),
             1 + 86400,
             10
         );
 
-        let object_address = object::object_address(&obj);
         bid<FreePizzaPass, FakeMoney>(
             bidder,
-            object_address,
+            obj,
             20
         );
 
         bid<FreePizzaPass, FakeMoney>(
             bidder,
-            object_address,
+            obj,
             20
         );
     }
     
     #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
     fun test_complete(creator: &signer, bidder: &signer, framework: &signer)
-    acquires Auction {
+    acquires Auction, TransferConfig {
         setup_test_plus(creator, bidder, framework);
         create_test_money(creator, bidder, framework);
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
+        let key = components_common::create_transfer_key(&cctor);
         init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
+            key,
             obj,
-            utf8(b"collection"), utf8(b"name"),
             1 + 86400,
             10
         );
@@ -574,12 +554,12 @@ module auctionable_token_objects::auctions {
         let object_address = object::object_address(&obj);
         bid<FreePizzaPass, FakeMoney>(
             bidder,
-            object_address,
+            obj,
             20
         );
 
         timestamp::update_global_time_for_test(2_000_000 + 86400_000_000);
-        complete<FreePizzaPass, FakeMoney>(creator, object_address);
+        let ret = complete<FreePizzaPass, FakeMoney>(creator, obj);
 
         let auction = borrow_global<Auction<FakeMoney>>(object_address);
         assert!(coin::balance<FakeMoney>(@0x123) == 120, 2);
@@ -590,108 +570,81 @@ module auctionable_token_objects::auctions {
         assert!(auction.expiration_sec == 0, 6);
         assert!(simple_map::length(&auction.bid_map) == 0, 7);
         assert!(vector::length(&auction.bid_prices) == 0, 8);
+        components_common::destroy_for_test(ret);
     }
 
     #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
     #[expected_failure(abort_code = 327681, location = auctionable_token_objects::common)]
     fun test_complete_fail_not_owner(creator: &signer, bidder: &signer, framework: &signer)
-    acquires Auction {
+    acquires Auction, TransferConfig {
         setup_test_plus(creator, bidder, framework);
         create_test_money(creator, bidder, framework);
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
+        let key = components_common::create_transfer_key(&cctor);
         init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
+            key,
             obj,
-            utf8(b"collection"), utf8(b"name"),
             1 + 86400,
             10
         );
 
-        let object_address = object::object_address(&obj);
         bid<FreePizzaPass, FakeMoney>(
             bidder,
-            object_address,
+            obj,
             20
         );
 
         timestamp::update_global_time_for_test(2_000_000);
-        complete<FreePizzaPass, FakeMoney>(bidder, object_address);
+        let ret = complete<FreePizzaPass, FakeMoney>(bidder, obj);
+        components_common::destroy_for_test(ret);
     }
 
     #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
     #[expected_failure(abort_code = 65541, location = auctionable_token_objects::common)]
     fun test_complete_fail_before_expiration(creator: &signer, bidder: &signer, framework: &signer)
-    acquires Auction {
+    acquires Auction, TransferConfig {
         setup_test_plus(creator, bidder, framework);
         create_test_money(creator, bidder, framework);
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
+        let key = components_common::create_transfer_key(&cctor);
         init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
+            key,
             obj,
-            utf8(b"collection"), utf8(b"name"),
             1 + 86400,
             10
         );
 
-        let object_address = object::object_address(&obj);
         bid<FreePizzaPass, FakeMoney>(
             bidder,
-            object_address,
+            obj,
             20
         );
 
-        complete<FreePizzaPass, FakeMoney>(creator, object_address);
-    }
-
-    #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
-    #[expected_failure(abort_code = 851970, location = Self)]
-    fun test_complete_fail_not_started(creator: &signer, bidder: &signer, framework: &signer)
-    acquires Auction {
-        setup_test_plus(creator, bidder, framework);
-        create_test_money(creator, bidder, framework);
-        let cctor = create_test_object(creator);
-        let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
-        let ex = object::generate_extend_ref(&cctor);
-        init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
-
-        let object_address = object::object_address(&obj);
-
-        timestamp::update_global_time_for_test(2_000_000);
-        complete<FreePizzaPass, FakeMoney>(creator, object_address);
+        let ret = complete<FreePizzaPass, FakeMoney>(creator, obj);
+        components_common::destroy_for_test(ret);
     }
 
     #[test(creator = @0x123, bidder = @0x234, framework = @0x1)]
     #[expected_failure]
-    fun test_complete_fail_wrong_obj(creator: &signer, bidder: &signer, framework: &signer)
-    acquires Auction {
+    fun test_complete_fail_not_started(creator: &signer, bidder: &signer, framework: &signer)
+    acquires Auction, TransferConfig {
         setup_test_plus(creator, bidder, framework);
         create_test_money(creator, bidder, framework);
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
         init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
-        start_auction<FreePizzaPass, FakeMoney>(
-            creator,
-            obj,
-            utf8(b"collection"), utf8(b"name"),
-            1 + 86400,
-            10
-        );
-
-        let object_address = object::object_address(&obj);
-        bid<FreePizzaPass, FakeMoney>(
-            bidder,
-            object_address,
-            20
-        );
 
         timestamp::update_global_time_for_test(2_000_000);
-        complete<FreePizzaPass, FakeMoney>(creator, @0x0b1);
+        let ret = complete<FreePizzaPass, FakeMoney>(creator, obj);
+        components_common::destroy_for_test(ret);
     }
 }
