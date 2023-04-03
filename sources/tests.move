@@ -59,7 +59,7 @@ module auctionable_token_objects::tests {
         move_to(&object::generate_signer(&cctor), FreePizzaPass{});
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor); 
         let ex = object::generate_extend_ref(&cctor);
-        let key = components_common::create_transfer_key(&cctor);
+        let key = components_common::create_transfer_key(cctor);
         auctions::init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         (obj, key)
     }
@@ -81,6 +81,7 @@ module auctionable_token_objects::tests {
         setup_test(owner, bidder_1, bidder_2, creator, framework);
         let (obj, key) = create_test_object(creator);
         object::transfer(creator, obj, @0x123);
+        components_common::disable_transfer(&mut key);
         auctions::start_auction<FreePizzaPass, FakeMoney>(
             owner,
             key,

@@ -117,7 +117,7 @@ module auctionable_token_objects::auctions {
         auction.lister = option::some(owner_addr);
     }
 
-    public fun bid<T: key, TCoin>(
+    public entry fun bid<T: key, TCoin>(
         bidder: &signer,
         object: Object<T>,
         bid_price: u64
@@ -270,7 +270,8 @@ module auctionable_token_objects::auctions {
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let obj_addr = object::object_address(&obj);
         let ex = object::generate_extend_ref(&cctor);
-        let key = components_common::create_transfer_key(&cctor);
+        let key = components_common::create_transfer_key(cctor);
+        components_common::disable_transfer(&mut key);
         init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
@@ -293,7 +294,8 @@ module auctionable_token_objects::auctions {
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
-        let key = components_common::create_transfer_key(&cctor);
+        let key = components_common::create_transfer_key(cctor);
+        components_common::disable_transfer(&mut key);
         init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             other,
@@ -312,7 +314,8 @@ module auctionable_token_objects::auctions {
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
-        let key = components_common::create_transfer_key(&cctor);
+        let key = components_common::create_transfer_key(cctor);
+        components_common::disable_transfer(&mut key);
         init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
@@ -331,7 +334,8 @@ module auctionable_token_objects::auctions {
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
-        let key = components_common::create_transfer_key(&cctor);
+        let key = components_common::create_transfer_key(cctor);
+        components_common::disable_transfer(&mut key);
         init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
@@ -351,7 +355,8 @@ module auctionable_token_objects::auctions {
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
-        let key = components_common::create_transfer_key(&cctor);
+        let key = components_common::create_transfer_key(cctor);
+        components_common::disable_transfer(&mut key);
         init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
@@ -370,7 +375,8 @@ module auctionable_token_objects::auctions {
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
-        let key = components_common::create_transfer_key(&cctor);
+        let key = components_common::create_transfer_key(cctor);
+        components_common::disable_transfer(&mut key);
         init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
@@ -402,7 +408,8 @@ module auctionable_token_objects::auctions {
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
-        let key = components_common::create_transfer_key(&cctor);
+        let key = components_common::create_transfer_key(cctor);
+        components_common::disable_transfer(&mut key);
         init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
@@ -428,7 +435,8 @@ module auctionable_token_objects::auctions {
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
-        let key = components_common::create_transfer_key(&cctor);
+        let key = components_common::create_transfer_key(cctor);
+        components_common::disable_transfer(&mut key);
         init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
@@ -454,7 +462,8 @@ module auctionable_token_objects::auctions {
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
-        let key = components_common::create_transfer_key(&cctor);
+        let key = components_common::create_transfer_key(cctor);
+        components_common::disable_transfer(&mut key);
         init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
@@ -480,7 +489,8 @@ module auctionable_token_objects::auctions {
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
-        let key = components_common::create_transfer_key(&cctor);
+        let key = components_common::create_transfer_key(cctor);
+        components_common::disable_transfer(&mut key);
         init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
@@ -508,7 +518,8 @@ module auctionable_token_objects::auctions {
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
-        let key = components_common::create_transfer_key(&cctor);
+        let key = components_common::create_transfer_key(cctor);
+        components_common::disable_transfer(&mut key);
         init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
@@ -539,7 +550,8 @@ module auctionable_token_objects::auctions {
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
-        let key = components_common::create_transfer_key(&cctor);
+        let key = components_common::create_transfer_key(cctor);
+        components_common::disable_transfer(&mut key);
         init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
@@ -580,7 +592,8 @@ module auctionable_token_objects::auctions {
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
-        let key = components_common::create_transfer_key(&cctor);
+        let key = components_common::create_transfer_key(cctor);
+        components_common::disable_transfer(&mut key);
         init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,
@@ -610,7 +623,8 @@ module auctionable_token_objects::auctions {
         let cctor = create_test_object(creator);
         let obj = object::object_from_constructor_ref<FreePizzaPass>(&cctor);
         let ex = object::generate_extend_ref(&cctor);
-        let key = components_common::create_transfer_key(&cctor);
+        let key = components_common::create_transfer_key(cctor);
+        components_common::disable_transfer(&mut key);
         init_for_coin_type<FreePizzaPass, FakeMoney>(&ex, obj, utf8(b"collection"), utf8(b"name"));
         start_auction<FreePizzaPass, FakeMoney>(
             creator,

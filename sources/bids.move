@@ -55,7 +55,7 @@ module auctionable_token_objects::bids {
         }
     }
 
-    public fun withdraw_from_expired<TCoin>(bidder: &signer)
+    public entry fun withdraw_from_expired<TCoin>(bidder: &signer)
     acquires BidRecords {
         let bidder_address = signer::address_of(bidder);
         let records = borrow_global_mut<BidRecords<TCoin>>(bidder_address);
