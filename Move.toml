@@ -7,7 +7,7 @@ AptosFramework = { local = "../../aptos-core/aptos-move/framework/aptos-framewor
 AptosToken = { local = "../../aptos-core/aptos-move/framework/aptos-token" }
 AptosTokenObjects = { local = "../../aptos-core/aptos-move/framework/aptos-token-objects" }
 
-ComponentsCommon = { local = "../components_common" }
+ComponentsCommon = { local = "../components_common/components_common" }
 
 [addresses]
 auctionable_token_objects = "0xcafe"
