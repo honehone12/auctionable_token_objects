@@ -8,6 +8,7 @@ module auctionable_token_objects::bids {
     use aptos_framework::coin::{Self, Coin};
     use aptos_token_objects::royalty::{Self, Royalty};
     use auctionable_token_objects::common;
+    use components_common::royalty_utils;
 
     const E_BID_ALREADY: u64 = 1;
     const E_UNEXPECTED_COIN_VALUE: u64 = 2; 
@@ -51,19 +52,6 @@ module auctionable_token_objects::bids {
                     bid_map: simple_map::create()
                 }
             )
-        }
-    }
-
-    inline fun calc_royalty(
-        value: u64,
-        royalty: &Royalty,
-    ): u64 {
-        let numerator = royalty::numerator(royalty);
-        let denominator = royalty::denominator(royalty);
-        if (numerator == 0 || denominator == 0) {
-            0
-        } else {
-            value * numerator / denominator
         }
     }
 
@@ -145,9 +133,8 @@ module auctionable_token_objects::bids {
         if (option::is_some(&royalty)) {
             let royalty_extracted = option::destroy_some(royalty);
             let royalty_addr = royalty::payee_address(&royalty_extracted);
-            let royalty_value = calc_royalty(stored_value, &royalty_extracted);
-            let royalty_coin = coin::extract(&mut stored_coin, royalty_value);
-            coin::deposit(royalty_addr, royalty_coin)
+            let royalty_coin = royalty_utils::extract_royalty(&mut stored_coin, &royalty_extracted);
+            coin::deposit(royalty_addr, royalty_coin);
         };
         stored_coin
     }
