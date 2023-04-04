@@ -13,6 +13,7 @@ module auctionable_token_objects::tests {
     use auctionable_token_objects::auctions;
     use auctionable_token_objects::bids;
     use components_common::components_common::{Self, TransferKey};
+    use components_common::token_objects_store;
 
     struct FreePizzaPass has key {}
 
@@ -38,6 +39,10 @@ module auctionable_token_objects::tests {
         coin::transfer<FakeMoney>(framework, @0x234, 100);
         coin::transfer<FakeMoney>(framework, @0x345, 100);
         coin::transfer<FakeMoney>(framework, @0x456, 100);
+        token_objects_store::register(owner);
+        token_objects_store::register(bidder_1);
+        token_objects_store::register(bidder_2);
+        token_objects_store::register(creator);
     }
 
     fun create_test_object(creator: &signer): (Object<FreePizzaPass>, TransferKey) {

@@ -13,6 +13,7 @@ module auctionable_token_objects::auctions {
     use auctionable_token_objects::common;
     use auctionable_token_objects::bids::{Self, BidId};
     use components_common::components_common::{Self, ComponentGroup, TransferKey};
+    use components_common::token_objects_store;
 
     const E_ALREADY_ACTIVE: u64 = 1;
     const E_NOT_ACTIVE: u64 = 2;
@@ -167,10 +168,13 @@ module auctionable_token_objects::auctions {
                 let coin = bids::execute_bid<TCoin>(bid_id, royalty);
                 assert!(coin::value(&coin) > 0, error::resource_exhausted(E_EMPTY_COIN));
                 
+                let bidder = bids::bidder(&bid_id);
                 let linear_transfer = components_common::generate_linear_transfer_ref(option::borrow(&transfer_config.transfer_key));
-                object::transfer_with_ref(linear_transfer, bids::bidder(&bid_id));
-                
+                object::transfer_with_ref(linear_transfer, bidder);    
                 coin::deposit(owner_addr, coin);
+
+                token_objects_store::update(owner_addr, object);
+                token_objects_store::update(bidder, object);
             };
         };
 
@@ -202,6 +206,8 @@ module auctionable_token_objects::auctions {
         account::create_account_for_test(signer::address_of(creator));
         account::create_account_for_test(signer::address_of(bidder));
         timestamp::set_time_has_started_for_testing(framework);
+        token_objects_store::register(creator);
+        token_objects_store::register(bidder);
     }
 
     #[test_only]

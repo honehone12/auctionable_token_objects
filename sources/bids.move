@@ -9,6 +9,7 @@ module auctionable_token_objects::bids {
     use aptos_token_objects::royalty::{Self, Royalty};
     use auctionable_token_objects::common;
     use components_common::royalty_utils;
+    use components_common::components_common::OwnershipGroup;
 
     const E_BID_ALREADY: u64 = 1;
     const E_UNEXPECTED_COIN_VALUE: u64 = 2; 
@@ -38,6 +39,7 @@ module auctionable_token_objects::bids {
         expiration_sec: u64
     }
 
+    #[resouce_group_member(group = OwnershipGroup)]
     struct BidRecords<phantom TCoin> has key {
         key_list: vector<BidId>,
         bid_map: SimpleMap<BidId, Bid<TCoin>>
