@@ -1,5 +1,5 @@
 # auctionable_token_objects
-auction component for token objects written in move.  
+auction component prototype for token objects written in move.  
 
 list of components  
 https://github.com/honehone12/components_common  
